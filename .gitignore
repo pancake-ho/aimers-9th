@@ -1,0 +1,16 @@
+# Competition data
+baseline/data/train.csv
+baseline/data/test.csv
+baseline/data/trackman_history.csv
+
+# Submission/model archives
+baseline/submit.zip
+
+# Python
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+
+# OS / IDE
+.vscode/
+.DS_Store
