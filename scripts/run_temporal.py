@@ -1,5 +1,3 @@
-# scripts/run_temporal.py
-
 from __future__ import annotations
 
 import argparse
@@ -27,26 +25,35 @@ if str(PROJECT_ROOT) not in sys.path:
     )
 
 
-from src.config import ExperimentConfig
+from src.config import (
+    ExperimentConfig,
+)
+
 from src.data import (
     load_train,
     validate_train_schema,
 )
+
 from src.features import (
     LeakageSafeFeatureEngineer,
     StrictPastTrackmanFeatures,
 )
+
 from src.metrics import (
+    evaluate_constant_baselines,
     evaluate_probabilities,
 )
+
 from src.models import (
     train_catboost,
     train_lightgbm,
     train_xgboost,
 )
+
 from src.preprocessing import (
     TabularPreprocessor,
 )
+
 from src.splits import (
     make_recency_weights,
     make_temporal_folds,
@@ -79,6 +86,20 @@ def parse_args():
     )
 
     parser.add_argument(
+        "--valid-season",
+        type=int,
+        default=None,
+        choices=[
+            2023,
+            2024,
+        ],
+        help=(
+            "Run only one temporal fold. "
+            "Recommended for memory safety."
+        ),
+    )
+
+    parser.add_argument(
         "--no-trackman",
         action="store_true",
     )
@@ -90,6 +111,104 @@ def parse_args():
     )
 
     return parser.parse_args()
+
+
+def print_memory(
+    label: str,
+):
+    try:
+        import resource
+
+        rss_kb = (
+            resource
+            .getrusage(
+                resource.RUSAGE_SELF
+            )
+            .ru_maxrss
+        )
+
+        rss_gb = (
+            rss_kb
+            / 1024.0
+            / 1024.0
+        )
+
+        print(
+            f"[MEM] {label}: "
+            f"peak RSS≈{rss_gb:.2f} GB"
+        )
+
+    except Exception:
+        pass
+
+
+def print_season_target_rates(
+    df: pd.DataFrame,
+    target_col: str,
+):
+
+    stats = (
+        df
+        .groupby(
+            "season"
+        )[target_col]
+        .agg(
+            [
+                "count",
+                "mean",
+            ]
+        )
+    )
+
+    print(
+        "\n[TARGET DRIFT]"
+    )
+
+    print(
+        stats.to_string()
+    )
+
+    print()
+
+
+def print_baselines(
+    baseline_metrics,
+):
+
+    print(
+        "\n[BASELINES]"
+    )
+
+    print(
+        "  train mean probability = "
+        f"{baseline_metrics['train_mean']:.6f}"
+    )
+
+    print(
+        "  train-mean Brier = "
+        f"{baseline_metrics['train_mean_brier']:.8f}"
+    )
+
+    if (
+        "latest_season_mean"
+        in baseline_metrics
+    ):
+        print(
+            "  latest train season = "
+            f"{baseline_metrics['latest_train_season']}"
+        )
+
+        print(
+            "  latest-season mean probability = "
+            f"{baseline_metrics['latest_season_mean']:.6f}"
+        )
+
+        print(
+            "  latest-season mean Brier = "
+            f"{baseline_metrics['latest_season_mean_brier']:.8f}"
+        )
+
+    print()
 
 
 def print_metrics(
@@ -106,11 +225,6 @@ def print_metrics(
     print(
         f"  Brier = "
         f"{metrics['brier']:.8f}"
-    )
-
-    print(
-        f"  BSS(empirical) = "
-        f"{metrics['brier_skill_empirical']:.6f}"
     )
 
     print(
@@ -144,6 +258,34 @@ def print_metrics(
     )
 
 
+def select_fold_specs(
+    config,
+    valid_season,
+):
+
+    if valid_season is None:
+        return (
+            config.temporal_folds
+        )
+
+    selected = tuple(
+        spec
+        for spec
+        in config.temporal_folds
+        if spec[1]
+        == valid_season
+    )
+
+    if not selected:
+        raise ValueError(
+            f"No fold found for "
+            f"valid season "
+            f"{valid_season}"
+        )
+
+    return selected
+
+
 def main():
 
     args = parse_args()
@@ -157,13 +299,23 @@ def main():
         ),
     )
 
+    fold_suffix = (
+        f"valid_{args.valid_season}"
+        if args.valid_season
+        is not None
+        else "all_folds"
+    )
+
     output_dir = (
-        config.paths.output_dir
+        config
+        .paths
+        .output_dir
         / args.experiment_name
         / (
             f"lambda_"
             f"{args.recency_lambda}"
         )
+        / fold_suffix
     )
 
     output_dir.mkdir(
@@ -189,8 +341,21 @@ def main():
         ),
     )
 
-    # Trackman is built from official history only.
-    # It NEVER reads test rows.
+    target_col = (
+        config
+        .features
+        .target_col
+    )
+
+    print_season_target_rates(
+        train_df,
+        target_col,
+    )
+
+    print_memory(
+        "after train load"
+    )
+
     trackman = None
 
     if config.use_trackman:
@@ -216,13 +381,24 @@ def main():
             )
         )
 
-    experiment_results = []
+        gc.collect()
 
-    prediction_frames = []
+        print_memory(
+            "after Trackman build"
+        )
+
+    fold_specs = (
+        select_fold_specs(
+            config,
+            args.valid_season,
+        )
+    )
+
+    experiment_results = []
 
     for fold in make_temporal_folds(
         train_df,
-        config.temporal_folds,
+        fold_specs,
     ):
 
         print(
@@ -255,12 +431,13 @@ def main():
             "=" * 80
         )
 
+        # No explicit .copy().
+        # FeatureEngineer owns its transformed copy.
         raw_train = (
             train_df
             .iloc[
                 fold.train_idx
             ]
-            .copy()
         )
 
         raw_valid = (
@@ -268,13 +445,6 @@ def main():
             .iloc[
                 fold.valid_idx
             ]
-            .copy()
-        )
-
-        target_col = (
-            config
-            .features
-            .target_col
         )
 
         y_train = (
@@ -282,7 +452,8 @@ def main():
                 target_col
             ]
             .to_numpy(
-                dtype=np.float32
+                dtype=np.float32,
+                copy=True,
             )
         )
 
@@ -291,13 +462,42 @@ def main():
                 target_col
             ]
             .to_numpy(
-                dtype=np.float32
+                dtype=np.float32,
+                copy=True,
             )
         )
 
-        # -----------------------------------------
-        # 1. FIT feature engineering on train only.
-        # -----------------------------------------
+        train_seasons_array = (
+            raw_train[
+                "season"
+            ]
+            .to_numpy(
+                dtype=np.int16,
+                copy=True,
+            )
+        )
+
+        baseline_metrics = (
+            evaluate_constant_baselines(
+                y_train=y_train,
+                y_valid=y_valid,
+                train_seasons=(
+                    train_seasons_array
+                ),
+            )
+        )
+
+        print_baselines(
+            baseline_metrics
+        )
+
+        print_memory(
+            "before feature engineering"
+        )
+
+        # -------------------------------------------------
+        # 1. Fold-local feature engineering
+        # -------------------------------------------------
 
         feature_engineer = (
             LeakageSafeFeatureEngineer(
@@ -331,9 +531,13 @@ def main():
             )
         )
 
-        # -----------------------------------------
-        # 2. FIT preprocessing on train only.
-        # -----------------------------------------
+        print_memory(
+            "after feature engineering"
+        )
+
+        # -------------------------------------------------
+        # 2. Fold-local preprocessing
+        # -------------------------------------------------
 
         preprocessor = (
             TabularPreprocessor(
@@ -364,6 +568,15 @@ def main():
             )
         )
 
+        del train_features
+        del valid_features
+
+        gc.collect()
+
+        print_memory(
+            "after preprocessing"
+        )
+
         if list(
             X_train.columns
         ) != list(
@@ -374,15 +587,13 @@ def main():
                 "columns do not match."
             )
 
-        # -----------------------------------------
-        # 3. Train-side recency weights only.
-        # -----------------------------------------
+        # -------------------------------------------------
+        # 3. Recency weight
+        # -------------------------------------------------
 
         sample_weight = (
             make_recency_weights(
-                raw_train[
-                    "season"
-                ].to_numpy(),
+                train_seasons_array,
                 max_train_season=max(
                     fold.train_seasons
                 ),
@@ -405,31 +616,41 @@ def main():
             f"{sample_weight.mean():.4f}"
         )
 
-        fold_pred_frame = pd.DataFrame(
-            {
-                "row_id": (
-                    raw_valid[
-                        config
-                        .features
-                        .id_col
-                    ].to_numpy()
-                ),
-                "season": (
-                    raw_valid[
-                        "season"
-                    ].to_numpy()
-                ),
-                "y_true": y_valid,
-            }
+        fold_pred_frame = (
+            pd.DataFrame(
+                {
+                    "row_id": (
+                        raw_valid[
+                            config
+                            .features
+                            .id_col
+                        ].to_numpy()
+                    ),
+                    "season": (
+                        raw_valid[
+                            "season"
+                        ].to_numpy()
+                    ),
+                    "y_true": (
+                        y_valid
+                    ),
+                }
+            )
         )
 
-        # -----------------------------------------
-        # 4. Models
-        # -----------------------------------------
+        # -------------------------------------------------
+        # 4. XGBoost
+        # -------------------------------------------------
 
         if "xgb" in args.models:
 
-            start = time.perf_counter()
+            print_memory(
+                "before XGBoost"
+            )
+
+            start = (
+                time.perf_counter()
+            )
 
             model, pred = (
                 train_xgboost(
@@ -460,7 +681,9 @@ def main():
 
             metrics[
                 "train_seconds"
-            ] = float(elapsed)
+            ] = float(
+                elapsed
+            )
 
             print_metrics(
                 fold.name,
@@ -470,11 +693,14 @@ def main():
 
             experiment_results.append(
                 {
-                    "fold": fold.name,
+                    "fold": (
+                        fold.name
+                    ),
                     "valid_season": (
                         fold.valid_season
                     ),
                     "model": "xgb",
+                    **baseline_metrics,
                     **metrics,
                 }
             )
@@ -493,9 +719,28 @@ def main():
                 )
             )
 
+            del model
+            del pred
+
+            gc.collect()
+
+            print_memory(
+                "after XGBoost"
+            )
+
+        # -------------------------------------------------
+        # 5. LightGBM
+        # -------------------------------------------------
+
         if "lgb" in args.models:
 
-            start = time.perf_counter()
+            print_memory(
+                "before LightGBM"
+            )
+
+            start = (
+                time.perf_counter()
+            )
 
             model, pred = (
                 train_lightgbm(
@@ -530,7 +775,9 @@ def main():
 
             metrics[
                 "train_seconds"
-            ] = float(elapsed)
+            ] = float(
+                elapsed
+            )
 
             print_metrics(
                 fold.name,
@@ -540,11 +787,14 @@ def main():
 
             experiment_results.append(
                 {
-                    "fold": fold.name,
+                    "fold": (
+                        fold.name
+                    ),
                     "valid_season": (
                         fold.valid_season
                     ),
                     "model": "lgb",
+                    **baseline_metrics,
                     **metrics,
                 }
             )
@@ -563,9 +813,28 @@ def main():
                 )
             )
 
+            del model
+            del pred
+
+            gc.collect()
+
+            print_memory(
+                "after LightGBM"
+            )
+
+        # -------------------------------------------------
+        # 6. CatBoost
+        # -------------------------------------------------
+
         if "cat" in args.models:
 
-            start = time.perf_counter()
+            print_memory(
+                "before CatBoost"
+            )
+
+            start = (
+                time.perf_counter()
+            )
 
             model, pred = (
                 train_catboost(
@@ -600,7 +869,9 @@ def main():
 
             metrics[
                 "train_seconds"
-            ] = float(elapsed)
+            ] = float(
+                elapsed
+            )
 
             print_metrics(
                 fold.name,
@@ -610,11 +881,14 @@ def main():
 
             experiment_results.append(
                 {
-                    "fold": fold.name,
+                    "fold": (
+                        fold.name
+                    ),
                     "valid_season": (
                         fold.valid_season
                     ),
                     "model": "cat",
+                    **baseline_metrics,
                     **metrics,
                 }
             )
@@ -633,9 +907,18 @@ def main():
                 )
             )
 
-        # -----------------------------------------
-        # 5. Save fold-local transformation states.
-        # -----------------------------------------
+            del model
+            del pred
+
+            gc.collect()
+
+            print_memory(
+                "after CatBoost"
+            )
+
+        # -------------------------------------------------
+        # 7. Save fold state
+        # -------------------------------------------------
 
         joblib.dump(
             {
@@ -659,46 +942,46 @@ def main():
             ),
         )
 
-        prediction_frames.append(
-            fold_pred_frame
+        fold_pred_frame.to_csv(
+            output_dir
+            / (
+                f"{fold.name}"
+                "_predictions.csv"
+            ),
+            index=False,
         )
 
-        del (
-            raw_train,
-            raw_valid,
-            train_features,
-            valid_features,
-            X_train,
-            X_valid,
-            y_train,
-            y_valid,
-        )
+        del raw_train
+        del raw_valid
+        del X_train
+        del X_valid
+        del y_train
+        del y_valid
+        del train_seasons_array
+        del sample_weight
+        del feature_engineer
+        del preprocessor
+        del fold_pred_frame
 
         gc.collect()
 
-    # ---------------------------------------------
-    # 6. Save all results
-    # ---------------------------------------------
+        print_memory(
+            "fold completed"
+        )
 
-    result_df = pd.DataFrame(
-        experiment_results
+    # -------------------------------------------------
+    # 8. Result summary
+    # -------------------------------------------------
+
+    result_df = (
+        pd.DataFrame(
+            experiment_results
+        )
     )
 
     result_df.to_csv(
         output_dir
         / "metrics.csv",
-        index=False,
-    )
-
-    all_predictions = pd.concat(
-        prediction_frames,
-        axis=0,
-        ignore_index=True,
-    )
-
-    all_predictions.to_csv(
-        output_dir
-        / "temporal_predictions.csv",
         index=False,
     )
 
@@ -713,6 +996,9 @@ def main():
             config.use_trackman
         ),
         "models": args.models,
+        "valid_season": (
+            args.valid_season
+        ),
     }
 
     with open(
@@ -721,6 +1007,7 @@ def main():
         "w",
         encoding="utf-8",
     ) as f:
+
         json.dump(
             summary,
             f,
@@ -737,21 +1024,35 @@ def main():
         "[DONE] Temporal validation"
     )
 
-    print(
-        result_df[
-            [
-                "fold",
-                "model",
-                "brier",
-                "logloss",
-                "auc",
-                "pred_mean",
-                "target_mean",
-            ]
-        ].to_string(
-            index=False
+    if not result_df.empty:
+
+        cols = [
+            "fold",
+            "model",
+            "brier",
+            "train_mean_brier",
+            "latest_season_mean_brier",
+            "logloss",
+            "auc",
+            "pred_mean",
+            "target_mean",
+            "train_seconds",
+        ]
+
+        cols = [
+            c
+            for c in cols
+            if c
+            in result_df.columns
+        ]
+
+        print(
+            result_df[
+                cols
+            ].to_string(
+                index=False
+            )
         )
-    )
 
     print(
         f"\nSaved to: "

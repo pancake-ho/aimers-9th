@@ -1,0 +1,11 @@
+{
+  "experiment_name": "E001b_v7_tabred_memoryfix",
+  "recency_lambda": 0.0,
+  "use_trackman": true,
+  "models": [
+    "xgb",
+    "lgb",
+    "cat"
+  ],
+  "valid_season": 2023
+}

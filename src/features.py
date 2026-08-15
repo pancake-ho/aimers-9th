@@ -1016,7 +1016,7 @@ class LeakageSafeFeatureEngineer:
         df: pd.DataFrame,
     ) -> pd.DataFrame:
 
-        out = df.copy()
+        out = df
 
         rate_cols = [
             f"{c}_smoothed"

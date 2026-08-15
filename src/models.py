@@ -1,15 +1,16 @@
-# src/models.py
-
 from __future__ import annotations
 
-from typing import Sequence, Tuple
+import gc
+from typing import Sequence
 
+import lightgbm as lgb
 import numpy as np
 import pandas as pd
-
 import xgboost as xgb
-import lightgbm as lgb
-from catboost import CatBoostClassifier
+
+from catboost import (
+    CatBoostClassifier,
+)
 
 from src.config import ModelConfig
 
@@ -20,13 +21,14 @@ def _xgb_brier_metric(
 ):
     y = dtrain.get_label()
 
-    brier = np.mean(
-        (
-            predt - y
-        ) ** 2
+    score = np.mean(
+        (predt - y) ** 2
     )
 
-    return "brier", float(brier)
+    return (
+        "brier",
+        float(score),
+    )
 
 
 def _lgb_brier_metric(
@@ -35,15 +37,13 @@ def _lgb_brier_metric(
 ):
     y = dataset.get_label()
 
-    brier = np.mean(
-        (
-            pred - y
-        ) ** 2
+    score = np.mean(
+        (pred - y) ** 2
     )
 
     return (
         "brier",
-        float(brier),
+        float(score),
         False,
     )
 
@@ -57,7 +57,12 @@ def train_xgboost(
     config: ModelConfig,
 ):
 
-    dtrain = xgb.DMatrix(
+    print(
+        "[XGB] Building "
+        "QuantileDMatrix..."
+    )
+
+    dtrain = xgb.QuantileDMatrix(
         X_train,
         label=y_train,
         weight=sample_weight,
@@ -66,12 +71,13 @@ def train_xgboost(
         ),
     )
 
-    dvalid = xgb.DMatrix(
+    dvalid = xgb.QuantileDMatrix(
         X_valid,
         label=y_valid,
         feature_names=list(
             X_valid.columns
         ),
+        ref=dtrain,
     )
 
     params = {
@@ -97,14 +103,16 @@ def train_xgboost(
         "disable_default_eval_metric": 1,
     }
 
-    # XGBoost >= 2 supports device.
     try:
         import torch
 
         if torch.cuda.is_available():
             params["device"] = "cuda"
+        else:
+            params["device"] = "cpu"
+
     except Exception:
-        pass
+        params["device"] = "cpu"
 
     model = xgb.train(
         params=params,
@@ -130,13 +138,27 @@ def train_xgboost(
         verbose_eval=50,
     )
 
+    best_iteration = (
+        model.best_iteration
+        if model.best_iteration
+        is not None
+        else config
+        .xgb_num_boost_round
+        - 1
+    )
+
     pred = model.predict(
         dvalid,
         iteration_range=(
             0,
-            model.best_iteration + 1,
+            best_iteration + 1,
         ),
     )
+
+    del dtrain
+    del dvalid
+
+    gc.collect()
 
     return model, pred
 
@@ -197,6 +219,7 @@ def train_lightgbm(
             config.random_seed
         ),
         "num_threads": 6,
+        "force_col_wise": True,
     }
 
     model = lgb.train(
@@ -206,9 +229,15 @@ def train_lightgbm(
             config
             .lgb_num_boost_round
         ),
-        valid_sets=[valid_set],
-        valid_names=["valid"],
-        feval=_lgb_brier_metric,
+        valid_sets=[
+            valid_set
+        ],
+        valid_names=[
+            "valid"
+        ],
+        feval=(
+            _lgb_brier_metric
+        ),
         callbacks=[
             lgb.early_stopping(
                 config
@@ -226,6 +255,11 @@ def train_lightgbm(
             model.best_iteration
         ),
     )
+
+    del train_set
+    del valid_set
+
+    gc.collect()
 
     return model, pred
 
@@ -269,15 +303,18 @@ def train_catboost(
         import torch
 
         if torch.cuda.is_available():
-            params["task_type"] = (
-                "GPU"
-            )
+            params[
+                "task_type"
+            ] = "GPU"
         else:
-            params["task_type"] = (
-                "CPU"
-            )
+            params[
+                "task_type"
+            ] = "CPU"
+
     except Exception:
-        params["task_type"] = "CPU"
+        params[
+            "task_type"
+        ] = "CPU"
 
     model = CatBoostClassifier(
         **params
