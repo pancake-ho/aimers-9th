@@ -18,24 +18,19 @@ from src.config import ExperimentConfig
 from src.features import LeakageSafeFeatureEngineer, StrictPastTrackmanFeatures
 from src.metrics import evaluate_probabilities
 from src.models import (
+    GBDT_MODEL_ORDER,
     MODEL_ORDER,
     train_catboost_fold,
     train_catboost_full,
     train_xgboost_fold,
     train_xgboost_full,
 )
-from src.neural import (
-    NEURAL_MODEL_ORDER,
-    NeuralPreprocessor,
-    prepare_neural_arrays,
-    release_torch_memory,
-    save_checkpoint,
-    train_neural_fold,
-    train_neural_full,
-)
 from src.preprocessing import TabularPreprocessor
 from src.runtime import apply_probability_bias, blend_predictions
 from src.splits import make_temporal_folds, uniform_weights
+
+
+NEURAL_MODEL_ORDER = ("resnet", "ft_transformer")
 
 
 def _print_metrics(label: str, metrics: Mapping[str, float]) -> None:
@@ -72,6 +67,8 @@ def run_temporal_validation(
 ) -> tuple[Dict[str, object], Dict[str, object]]:
     target = config.features.target_col
     fold_results = []
+    model_order = MODEL_ORDER if config.neural.enabled else GBDT_MODEL_ORDER
+    print(f"[ENSEMBLE] active_models={list(model_order)}")
 
     for fold in make_temporal_folds(train, config.temporal_folds):
         print("\n" + "=" * 88)
@@ -128,37 +125,47 @@ def run_temporal_validation(
         del cat_model
         gc.collect()
 
-        neural_preprocessor = NeuralPreprocessor(
-            categorical_cols=preprocessor.cat_cols_,
-            numerical_cols=preprocessor.num_cols_,
-        ).fit(X_train)
-        neural_state = neural_preprocessor.export_state()
-        train_arrays = prepare_neural_arrays(X_train, neural_state)
-        valid_arrays = prepare_neural_arrays(X_valid, neural_state)
-
-        for offset, kind in enumerate(NEURAL_MODEL_ORDER, start=1):
-            start = time.perf_counter()
-            neural_model, prediction, best_epoch, _ = train_neural_fold(
-                kind=kind,
-                train_arrays=train_arrays,
-                y_train=y_train,
-                sample_weight=sample_weight,
-                valid_arrays=valid_arrays,
-                y_valid=y_valid,
-                neural_state=neural_state,
-                config=config.neural,
-                random_seed=config.models.random_seed + 100 * offset + fold.valid_season,
+        if config.neural.enabled:
+            from src.neural import (
+                NeuralPreprocessor,
+                prepare_neural_arrays,
+                release_torch_memory,
+                train_neural_fold,
             )
-            elapsed = time.perf_counter() - start
-            predictions[kind] = prediction
-            best_iterations[kind] = int(best_epoch)
-            per_model_metrics[kind] = evaluate_probabilities(y_valid, prediction)
-            per_model_metrics[kind]["train_seconds"] = float(elapsed)
-            _print_metrics(f"{fold.valid_season}/{kind}", per_model_metrics[kind])
-            del neural_model, prediction
-            release_torch_memory()
 
-        del X_train, X_valid, sample_weight, train_arrays, valid_arrays, neural_state
+            neural_preprocessor = NeuralPreprocessor(
+                categorical_cols=preprocessor.cat_cols_,
+                numerical_cols=preprocessor.num_cols_,
+            ).fit(X_train)
+            neural_state = neural_preprocessor.export_state()
+            train_arrays = prepare_neural_arrays(X_train, neural_state)
+            valid_arrays = prepare_neural_arrays(X_valid, neural_state)
+
+            for offset, kind in enumerate(NEURAL_MODEL_ORDER, start=1):
+                start = time.perf_counter()
+                neural_model, prediction, best_epoch, _ = train_neural_fold(
+                    kind=kind,
+                    train_arrays=train_arrays,
+                    y_train=y_train,
+                    sample_weight=sample_weight,
+                    valid_arrays=valid_arrays,
+                    y_valid=y_valid,
+                    neural_state=neural_state,
+                    config=config.neural,
+                    random_seed=config.models.random_seed + 100 * offset + fold.valid_season,
+                )
+                elapsed = time.perf_counter() - start
+                predictions[kind] = prediction
+                best_iterations[kind] = int(best_epoch)
+                per_model_metrics[kind] = evaluate_probabilities(y_valid, prediction)
+                per_model_metrics[kind]["train_seconds"] = float(elapsed)
+                _print_metrics(f"{fold.valid_season}/{kind}", per_model_metrics[kind])
+                del neural_model, prediction
+                release_torch_memory()
+
+            del train_arrays, valid_arrays, neural_state
+
+        del X_train, X_valid, sample_weight
         gc.collect()
 
         fold_results.append(
@@ -181,17 +188,19 @@ def run_temporal_validation(
         fold_results,
         fold_importance=config.temporal_fold_importance,
         step=config.ensemble_grid_step,
+        model_order=model_order,
     )
     calibrator = fit_prequential_bias_calibrator(
         earlier_fold=fold_results[0],
         recent_fold=fold_results[1],
         weights=weights,
+        model_order=model_order,
     )
 
     fold_summaries = []
     for fold in fold_results:
         ensemble = blend_predictions(
-            [fold["predictions"][name] for name in MODEL_ORDER], weights
+            [fold["predictions"][name] for name in model_order], weights
         )
         ensemble_metrics = evaluate_probabilities(fold["y_true"], ensemble)
         _print_metrics(f"{fold['valid_season']}/ensemble", ensemble_metrics)
@@ -209,7 +218,7 @@ def run_temporal_validation(
 
     recent = fold_results[1]
     recent_ensemble = blend_predictions(
-        [recent["predictions"][name] for name in MODEL_ORDER], weights
+        [recent["predictions"][name] for name in model_order], weights
     )
     transferred = apply_probability_bias(
         recent_ensemble, calibrator["earlier_bias"]
@@ -236,28 +245,37 @@ def run_temporal_validation(
                 max(50, round(recent_iterations["cat"] * 1.05)),
             )
         ),
-        "resnet": int(
-            min(
-                config.neural.max_epochs,
-                max(2, round(recent_iterations["resnet"] * 1.05)),
-            )
-        ),
-        "ft_transformer": int(
-            min(
-                config.neural.max_epochs,
-                max(2, round(recent_iterations["ft_transformer"] * 1.05)),
-            )
-        ),
     }
+    if config.neural.enabled:
+        final_iterations.update(
+            {
+                "resnet": int(
+                    min(
+                        config.neural.resnet_max_epochs,
+                        max(2, round(recent_iterations["resnet"] * 1.05)),
+                    )
+                ),
+                "ft_transformer": int(
+                    min(
+                        config.neural.ft_max_epochs,
+                        max(2, round(recent_iterations["ft_transformer"] * 1.05)),
+                    )
+                ),
+            }
+        )
 
     ensemble_state = {
-        "model_order": list(MODEL_ORDER),
+        "model_order": list(model_order),
         "weights": weights.tolist(),
         "calibration": calibrator,
         "final_iterations": final_iterations,
     }
     report = {
-        "strategy": "temporal_gbdt_resnet_ftt_probability_bias_v3",
+        "strategy": (
+            "temporal_gbdt_resnet_ftt_probability_bias_v3"
+            if config.neural.enabled
+            else "temporal_xgb_cat_probability_bias_cpu_fallback_v1"
+        ),
         "folds": fold_summaries,
         "weight_selection": weight_report,
         "calibration": calibrator,
@@ -315,33 +333,44 @@ def train_and_save_final_models(
     del cat_model
     gc.collect()
 
-    neural_preprocessor = NeuralPreprocessor(
-        categorical_cols=preprocessor.cat_cols_,
-        numerical_cols=preprocessor.num_cols_,
-    ).fit(X)
-    neural_state = neural_preprocessor.export_state()
-    train_arrays = prepare_neural_arrays(X, neural_state)
+    neural_state = None
     neural_paths: Dict[str, Path] = {}
-    for offset, kind in enumerate(NEURAL_MODEL_ORDER, start=1):
-        epochs = int(ensemble_state["final_iterations"][kind])
-        print(f"[FINAL] Training {kind} for {epochs} epochs...")
-        neural_model, model_spec = train_neural_full(
-            kind=kind,
-            train_arrays=train_arrays,
-            y_train=y,
-            sample_weight=sample_weight,
-            neural_state=neural_state,
-            config=config.neural,
-            random_seed=config.models.random_seed + 100 * offset + 2025,
-            epochs=epochs,
+    if config.neural.enabled:
+        from src.neural import (
+            NeuralPreprocessor,
+            prepare_neural_arrays,
+            release_torch_memory,
+            save_checkpoint,
+            train_neural_full,
         )
-        neural_path = model_dir / f"{kind}.pt"
-        save_checkpoint(neural_path, neural_model, model_spec)
-        neural_paths[kind] = neural_path
-        del neural_model
-        release_torch_memory()
 
-    del X, sample_weight, train_arrays
+        neural_preprocessor = NeuralPreprocessor(
+            categorical_cols=preprocessor.cat_cols_,
+            numerical_cols=preprocessor.num_cols_,
+        ).fit(X)
+        neural_state = neural_preprocessor.export_state()
+        train_arrays = prepare_neural_arrays(X, neural_state)
+        for offset, kind in enumerate(NEURAL_MODEL_ORDER, start=1):
+            epochs = int(ensemble_state["final_iterations"][kind])
+            print(f"[FINAL] Training {kind} for {epochs} epochs...")
+            neural_model, model_spec = train_neural_full(
+                kind=kind,
+                train_arrays=train_arrays,
+                y_train=y,
+                sample_weight=sample_weight,
+                neural_state=neural_state,
+                config=config.neural,
+                random_seed=config.models.random_seed + 100 * offset + 2025,
+                epochs=epochs,
+            )
+            neural_path = model_dir / f"{kind}.pt"
+            save_checkpoint(neural_path, neural_model, model_spec)
+            neural_paths[kind] = neural_path
+            del neural_model
+            release_torch_memory()
+        del train_arrays
+
+    del X, sample_weight
     gc.collect()
 
     raw_feature_cols = [col for col in train.columns if col != target]
@@ -365,7 +394,11 @@ def train_and_save_final_models(
     joblib.dump(bundle, bundle_path, compress=3)
 
     manifest = {
-        "strategy": "temporal_gbdt_resnet_ftt_probability_bias_v3",
+        "strategy": (
+            "temporal_gbdt_resnet_ftt_probability_bias_v3"
+            if config.neural.enabled
+            else "temporal_xgb_cat_probability_bias_cpu_fallback_v1"
+        ),
         "bundle_version": 3,
         "model_order": list(ensemble_state["model_order"]),
         "weights": list(ensemble_state["weights"]),
@@ -375,8 +408,7 @@ def train_and_save_final_models(
         "model_files": [
             xgb_path.name,
             cat_path.name,
-            neural_paths["resnet"].name,
-            neural_paths["ft_transformer"].name,
+            *[neural_paths[name].name for name in NEURAL_MODEL_ORDER if name in neural_paths],
             bundle_path.name,
         ],
     }

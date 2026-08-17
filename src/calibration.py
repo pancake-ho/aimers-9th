@@ -29,11 +29,11 @@ def _integer_compositions(total: int, parts: int):
             yield (first, *remainder)
 
 
-def _candidate_weights(step: float = 0.05):
+def _candidate_weights(step: float = 0.05, model_order: Sequence[str] = MODEL_ORDER):
     n_steps = int(round(1.0 / step))
     if n_steps <= 0 or not np.isclose(n_steps * step, 1.0):
         raise ValueError("Ensemble step must divide one exactly.")
-    for composition in _integer_compositions(n_steps, len(MODEL_ORDER)):
+    for composition in _integer_compositions(n_steps, len(model_order)):
         yield np.asarray(composition, dtype=np.float64) / n_steps
 
 
@@ -41,6 +41,7 @@ def select_stable_weights(
     folds: Sequence[Mapping[str, object]],
     fold_importance: Sequence[float],
     step: float = 0.05,
+    model_order: Sequence[str] = MODEL_ORDER,
 ) -> tuple[np.ndarray, Dict[str, object]]:
     """Minimize a regime-aware forward Brier objective.
 
@@ -54,18 +55,42 @@ def select_stable_weights(
     if (importance < 0).any() or not np.isfinite(importance).all() or importance.sum() <= 0:
         raise ValueError("fold_importance must be finite and non-negative.")
     importance /= importance.sum()
+    # For each fold, Brier(Pw, y) is a low-dimensional quadratic form.
+    # Precomputing it makes a fine simplex grid independent of row count.
+    quadratic_folds = []
+    for fold in folds:
+        prediction_matrix = np.column_stack(
+            [
+                np.clip(
+                    np.asarray(fold["predictions"][name], dtype=np.float64),
+                    1e-6,
+                    1.0 - 1e-6,
+                )
+                for name in model_order
+            ]
+        )
+        target = np.asarray(fold["y_true"], dtype=np.float64)
+        if prediction_matrix.shape[0] != target.shape[0]:
+            raise ValueError("Fold prediction and target lengths do not match.")
+        n_rows = float(len(target))
+        quadratic_folds.append(
+            (
+                prediction_matrix.T @ prediction_matrix / n_rows,
+                prediction_matrix.T @ target / n_rows,
+                float(target @ target / n_rows),
+            )
+        )
+
     best_weights = None
     best_score = np.inf
     best_fold_scores = None
 
-    for weights in _candidate_weights(step):
+    for weights in _candidate_weights(step, model_order=model_order):
         fold_scores = []
-        for fold in folds:
-            prediction = blend_predictions(
-                [fold["predictions"][name] for name in MODEL_ORDER],
-                weights,
+        for gram, linear, constant in quadratic_folds:
+            fold_scores.append(
+                float(weights @ gram @ weights - 2.0 * linear @ weights + constant)
             )
-            fold_scores.append(brier_score(fold["y_true"], prediction))
         score = float(np.dot(importance, np.asarray(fold_scores)))
         if score < best_score:
             best_score = score
@@ -75,7 +100,7 @@ def select_stable_weights(
     if best_weights is None:
         raise RuntimeError("No ensemble weight candidate was evaluated.")
     report = {
-        "model_order": list(MODEL_ORDER),
+        "model_order": list(model_order),
         "weights": best_weights.tolist(),
         "forward_weighted_brier": best_score,
         "fold_brier": [float(value) for value in best_fold_scores],
@@ -89,6 +114,7 @@ def fit_prequential_bias_calibrator(
     earlier_fold: Mapping[str, object],
     recent_fold: Mapping[str, object],
     weights: Sequence[float],
+    model_order: Sequence[str] = MODEL_ORDER,
     min_gain: float = 1e-7,
 ) -> Dict[str, object]:
     """Validate an intercept-only Brier correction across adjacent years.
@@ -99,10 +125,10 @@ def fit_prequential_bias_calibrator(
     holdout for one-step-ahead inference.
     """
     earlier_pred = blend_predictions(
-        [earlier_fold["predictions"][name] for name in MODEL_ORDER], weights
+        [earlier_fold["predictions"][name] for name in model_order], weights
     )
     recent_pred = blend_predictions(
-        [recent_fold["predictions"][name] for name in MODEL_ORDER], weights
+        [recent_fold["predictions"][name] for name in model_order], weights
     )
     earlier_bias = probability_bias(earlier_fold["y_true"], earlier_pred)
     recent_bias = probability_bias(recent_fold["y_true"], recent_pred)

@@ -80,8 +80,17 @@ def main() -> None:
     print("[1/8] Load immutable model bundle and runtimes")
     bundle = joblib.load(MODEL_DIR / "bundle.pkl")
     runtime = _load_module("runtime.py", "aimers_runtime")
-    neural = _load_module("neural_runtime.py", "aimers_neural_runtime")
-    neural.torch.set_num_threads(6)
+    model_order = list(bundle["ensemble"]["model_order"])
+    supported_orders = [
+        ["xgb", "cat"],
+        ["xgb", "cat", "resnet", "ft_transformer"],
+    ]
+    if model_order not in supported_orders:
+        raise ValueError(f"Unsupported model order: {model_order}")
+    neural = None
+    if "resnet" in model_order or "ft_transformer" in model_order:
+        neural = _load_module("neural_runtime.py", "aimers_neural_runtime")
+        neural.torch.set_num_threads(6)
 
     print("[2/8] Load and validate official inputs")
     test = _load_csv(DATA_DIR / "test.csv")
@@ -104,43 +113,39 @@ def main() -> None:
     dtest = xgb.DMatrix(X, feature_names=list(X.columns))
     xgb_prediction = np.asarray(xgb_model.predict(dtest), dtype=np.float64)
     cat_prediction = np.asarray(cat_model.predict_proba(X)[:, 1], dtype=np.float64)
+    predictions = {
+        "xgb": xgb_prediction,
+        "cat": cat_prediction,
+    }
     del dtest, xgb_model, cat_model
     gc.collect()
 
-    print("[6/8] Predict tabular ResNet + FT-Transformer on CPU")
-    neural_arrays = neural.prepare_neural_arrays(
-        X, bundle["neural_preprocessor_state"]
-    )
-    resnet_model = neural.load_checkpoint(MODEL_DIR / "resnet.pt", device="cpu")
-    resnet_prediction = neural.predict_model(
-        resnet_model, neural_arrays, device="cpu", batch_size=8192
-    )
-    del resnet_model
-    ft_model = neural.load_checkpoint(
-        MODEL_DIR / "ft_transformer.pt", device="cpu"
-    )
-    ft_prediction = neural.predict_model(
-        ft_model, neural_arrays, device="cpu", batch_size=2048
-    )
-    del ft_model, neural_arrays, X
+    if neural is not None:
+        print("[6/8] Predict tabular ResNet + FT-Transformer on CPU")
+        neural_arrays = neural.prepare_neural_arrays(
+            X, bundle["neural_preprocessor_state"]
+        )
+        resnet_model = neural.load_checkpoint(MODEL_DIR / "resnet.pt", device="cpu")
+        predictions["resnet"] = neural.predict_model(
+            resnet_model, neural_arrays, device="cpu", batch_size=8192
+        )
+        del resnet_model
+        ft_model = neural.load_checkpoint(
+            MODEL_DIR / "ft_transformer.pt", device="cpu"
+        )
+        predictions["ft_transformer"] = neural.predict_model(
+            ft_model, neural_arrays, device="cpu", batch_size=2048
+        )
+        del ft_model, neural_arrays
+    else:
+        print("[6/8] Neural models absent: use validated GBDT-only fallback")
+    del X
     gc.collect()
 
     print("[7/8] Blend and apply prequential calibration")
     ensemble = bundle["ensemble"]
-    if list(ensemble["model_order"]) != [
-        "xgb",
-        "cat",
-        "resnet",
-        "ft_transformer",
-    ]:
-        raise ValueError(f"Unsupported model order: {ensemble['model_order']}")
     prediction = runtime.blend_predictions(
-        [
-            xgb_prediction,
-            cat_prediction,
-            resnet_prediction,
-            ft_prediction,
-        ],
+        [predictions[name] for name in model_order],
         ensemble["weights"],
     )
     calibration = ensemble["calibration"]

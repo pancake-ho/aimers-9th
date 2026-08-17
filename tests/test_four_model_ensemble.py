@@ -53,6 +53,35 @@ class FourModelEnsembleTests(unittest.TestCase):
         self.assertGreaterEqual(float(weights[2] + weights[3]), 0.5)
         self.assertEqual(report["fold_importance"], [0.2, 0.8])
 
+    def test_simplex_search_supports_gbdt_only_fallback(self):
+        y = np.asarray([0, 0, 1, 1], dtype=np.float64)
+        folds = [
+            {
+                "y_true": y,
+                "predictions": {
+                    "xgb": np.asarray([0.2, 0.3, 0.7, 0.8]),
+                    "cat": np.asarray([0.3, 0.4, 0.6, 0.7]),
+                },
+            },
+            {
+                "y_true": y,
+                "predictions": {
+                    "xgb": np.asarray([0.1, 0.2, 0.8, 0.9]),
+                    "cat": np.asarray([0.4, 0.4, 0.6, 0.6]),
+                },
+            },
+        ]
+        order = ("xgb", "cat")
+        weights, report = select_stable_weights(
+            folds,
+            fold_importance=(0.2, 0.8),
+            step=0.025,
+            model_order=order,
+        )
+        self.assertEqual(weights.shape, (2,))
+        self.assertAlmostEqual(float(weights.sum()), 1.0)
+        self.assertEqual(report["model_order"], list(order))
+
 
 if __name__ == "__main__":
     unittest.main()

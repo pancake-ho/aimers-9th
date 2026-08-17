@@ -89,7 +89,8 @@ conda activate aimers
 echo "[ENV] conda=${CONDA_DEFAULT_ENV:-unknown}"
 echo "[ENV] python=$(which python)"
 python --version
-python - <<'PY'
+TORCH_BUILD_OK=1
+if ! python - <<'PY'
 import sys
 
 import catboost
@@ -118,30 +119,36 @@ if torch_base_version != "2.5.1" or torch.version.cuda != "12.1":
     )
     raise SystemExit(65)
 PY
+then
+    TORCH_BUILD_OK=0
+    echo "[FALLBACK] PyTorch build is not usable; neural models will be disabled."
+fi
 
 echo "[RESOURCE] CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-unset}"
+GPU_READY=1
 if ! nvidia-smi; then
-    echo "[ERROR] NVIDIA driver could not open the allocated GPU on $(hostname -s)."
-    echo "[ERROR] This is a compute-node/driver failure; training has not started."
-    echo "[FIX] Resubmit on another node or report host=$(hostname -s), job=${JOB_ID} to the Seraph administrator."
-    exit 70
+    GPU_READY=0
+    echo "[WARN] NVIDIA driver could not open the allocated GPU on $(hostname -s)."
+    echo "[FALLBACK] Continue with leakage-safe XGBoost+CatBoost CPU training."
 fi
-nvidia-smi -L || true
 
-echo "[GPU-DIAG] NVIDIA device nodes"
-for device_node in /dev/nvidiactl /dev/nvidia-uvm /dev/nvidia-uvm-tools; do
-    if [[ -e "${device_node}" ]]; then
-        ls -l "${device_node}"
-    else
-        echo "[GPU-DIAG] MISSING ${device_node}"
-    fi
-done
-for device_node in /dev/nvidia[0-9]*; do
-    [[ -e "${device_node}" ]] && ls -l "${device_node}"
-done
+if [[ "${GPU_READY}" -eq 1 ]]; then
+    nvidia-smi -L || true
 
-echo "[GPU-DIAG] Direct CUDA Driver API initialization"
-python - <<'PY'
+    echo "[GPU-DIAG] NVIDIA device nodes"
+    for device_node in /dev/nvidiactl /dev/nvidia-uvm /dev/nvidia-uvm-tools; do
+        if [[ -e "${device_node}" ]]; then
+            ls -l "${device_node}"
+        else
+            echo "[GPU-DIAG] MISSING ${device_node}"
+        fi
+    done
+    for device_node in /dev/nvidia[0-9]*; do
+        [[ -e "${device_node}" ]] && ls -l "${device_node}"
+    done
+
+    echo "[GPU-DIAG] Direct CUDA Driver API initialization"
+    if ! python - <<'PY'
 import ctypes
 import ctypes.util
 import os
@@ -189,12 +196,22 @@ if result != 0:
     )
     raise SystemExit(71)
 PY
+    then
+        GPU_READY=0
+        echo "[FALLBACK] CUDA Driver API is unavailable; neural models will be disabled."
+    fi
+fi
 
 free -h
 df -h /local_datasets
 
-echo "[GPU-PROBE] Testing PyTorch CUDA initialization"
-python - <<'PY'
+if [[ "${TORCH_BUILD_OK}" -eq 0 ]]; then
+    GPU_READY=0
+fi
+
+if [[ "${GPU_READY}" -eq 1 ]]; then
+    echo "[GPU-PROBE] Testing PyTorch CUDA initialization"
+    if ! python - <<'PY'
 import os
 import socket
 import sys
@@ -215,6 +232,17 @@ assert torch.isfinite(y).all()
 torch.cuda.synchronize()
 print(f"[GPU-PROBE] PASS device={torch.cuda.get_device_name(0)}")
 PY
+    then
+        GPU_READY=0
+        echo "[FALLBACK] PyTorch CUDA probe failed; neural models will be disabled."
+    fi
+fi
+
+if [[ "${GPU_READY}" -eq 1 ]]; then
+    echo "[MODE] four_model_gpu"
+else
+    echo "[MODE] gbdt_cpu_fallback"
+fi
 
 echo "[STAGE] Copying source code to ${LOCAL_PROJECT}"
 rsync -a \
@@ -271,16 +299,36 @@ done
 
 cd "${LOCAL_PROJECT}"
 echo "[STAGE] Local working directory: $(pwd)"
-echo "[TRAIN] XGBoost=CPU, CatBoost=CPU, ResNet=CUDA, FT-Transformer=CUDA"
 
 TRAIN_ARGS=(
     "--clean"
     "--cat-task-type" "CPU"
     "--xgb-device" "cpu"
-    "--nn-device" "cuda"
 )
+if [[ "${GPU_READY}" -eq 1 ]]; then
+    TRAIN_ARGS+=("--nn-device" "cuda")
+    echo "[TRAIN] XGBoost=CPU, CatBoost=CPU, ResNet=CUDA, FT-Transformer=CUDA"
+else
+    TRAIN_ARGS+=("--disable-neural")
+    echo "[TRAIN] XGBoost=CPU, CatBoost=CPU, neural=DISABLED"
+fi
 echo "[TRAIN] command: python scripts/train_submit.py ${TRAIN_ARGS[*]}"
-python scripts/train_submit.py "${TRAIN_ARGS[@]}"
+if ! python scripts/train_submit.py "${TRAIN_ARGS[@]}"; then
+    if [[ "${GPU_READY}" -ne 1 ]]; then
+        echo "[ERROR] GBDT CPU fallback training failed."
+        exit 1
+    fi
+    echo "[FALLBACK] Four-model training failed after CUDA preflight."
+    echo "[FALLBACK] Restarting clean XGBoost+CatBoost CPU training in the same job."
+    TRAIN_ARGS=(
+        "--clean"
+        "--cat-task-type" "CPU"
+        "--xgb-device" "cpu"
+        "--disable-neural"
+    )
+    echo "[TRAIN] retry command: python scripts/train_submit.py ${TRAIN_ARGS[*]}"
+    python scripts/train_submit.py "${TRAIN_ARGS[@]}"
+fi
 
 echo "[BUILD] Building submit.zip"
 python scripts/build_submit.py

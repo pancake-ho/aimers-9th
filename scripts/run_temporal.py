@@ -13,7 +13,6 @@ if str(PROJECT_ROOT) not in sys.path:
 from src.config import ExperimentConfig, ModelConfig, NeuralConfig
 from src.data import load_csv, validate_train_schema
 from src.models import validate_xgboost_backend
-from src.neural import validate_neural_backend
 from src.training import build_feature_table, run_temporal_validation
 
 
@@ -23,6 +22,7 @@ def parse_args():
     parser.add_argument("--cat-task-type", choices=("CPU", "GPU"), default="CPU")
     parser.add_argument("--xgb-device", choices=("cpu", "cuda"), default="cpu")
     parser.add_argument("--nn-device", choices=("auto", "cpu", "cuda"), default="cuda")
+    parser.add_argument("--disable-neural", action="store_true")
     parser.add_argument(
         "--output",
         type=Path,
@@ -39,10 +39,13 @@ def main():
             cat_task_type=args.cat_task_type,
             xgb_device=args.xgb_device,
         ),
-        neural=NeuralConfig(device=args.nn_device),
+        neural=NeuralConfig(enabled=not args.disable_neural, device=args.nn_device),
     )
     validate_xgboost_backend(config.models)
-    validate_neural_backend(config.neural)
+    if config.neural.enabled:
+        from src.neural import validate_neural_backend
+
+        validate_neural_backend(config.neural)
     train = load_csv(config.paths.train_path)
     validate_train_schema(
         train,

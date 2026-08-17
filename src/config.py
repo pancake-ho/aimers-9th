@@ -120,6 +120,7 @@ class ModelConfig:
 class NeuralConfig:
     """GPU training settings for the two out-of-family tabular learners."""
 
+    enabled: bool = True
     device: str = "cuda"
     num_workers: int = 0
     max_grad_norm: float = 1.0

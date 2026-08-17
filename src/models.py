@@ -11,7 +11,8 @@ from catboost import CatBoostClassifier
 from src.config import ModelConfig
 
 
-MODEL_ORDER = ("xgb", "cat", "resnet", "ft_transformer")
+GBDT_MODEL_ORDER = ("xgb", "cat")
+MODEL_ORDER = (*GBDT_MODEL_ORDER, "resnet", "ft_transformer")
 
 
 def _xgb_brier_metric(prediction, dmatrix):
@@ -26,12 +27,12 @@ def _xgb_params(config: ModelConfig) -> dict:
         "disable_default_eval_metric": 1,
         "learning_rate": config.xgb_learning_rate,
         "max_depth": config.xgb_max_depth,
-        "min_child_weight": 30.0,
-        "subsample": 0.90,
-        "colsample_bytree": 0.90,
-        "reg_lambda": 8.0,
-        "reg_alpha": 0.05,
-        "gamma": 0.0,
+        "min_child_weight": config.xgb_min_child_weight,
+        "subsample": config.xgb_subsample,
+        "colsample_bytree": config.xgb_colsample_bytree,
+        "reg_lambda": config.xgb_reg_lambda,
+        "reg_alpha": config.xgb_reg_alpha,
+        "gamma": config.xgb_gamma,
         "tree_method": "hist",
         "max_bin": int(config.xgb_max_bin),
         "device": config.xgb_device.lower(),
@@ -173,10 +174,10 @@ def _catboost_params(config: ModelConfig, iterations: int | None = None) -> dict
         "loss_function": "Logloss",
         "eval_metric": "BrierScore",
         "random_seed": config.random_seed,
-        "l2_leaf_reg": 8.0,
-        "random_strength": 0.35,
-        "bootstrap_type": "Bayesian",
-        "bagging_temperature": 0.5,
+        "l2_leaf_reg": config.cat_l2_leaf_reg,
+        "random_strength": config.cat_random_strength,
+        "bootstrap_type": config.cat_bootstrap_type,
+        "bagging_temperature": config.cat_bagging_temperature,
         "verbose": 50,
         "allow_writing_files": False,
         "thread_count": config.num_threads,

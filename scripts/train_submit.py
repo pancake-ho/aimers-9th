@@ -16,7 +16,6 @@ if str(PROJECT_ROOT) not in sys.path:
 from src.config import ExperimentConfig, ModelConfig, NeuralConfig
 from src.data import load_csv, validate_train_schema
 from src.models import validate_xgboost_backend
-from src.neural import validate_neural_backend
 from src.training import (
     build_feature_table,
     run_temporal_validation,
@@ -48,6 +47,11 @@ def parse_args():
         default="cuda",
         help="Training device for ResNet and FT-Transformer; Seraph should use cuda.",
     )
+    parser.add_argument(
+        "--disable-neural",
+        action="store_true",
+        help="Train a leakage-safe XGBoost+CatBoost fallback without PyTorch models.",
+    )
     return parser.parse_args()
 
 
@@ -59,10 +63,15 @@ def main():
             cat_task_type=args.cat_task_type,
             xgb_device=args.xgb_device,
         ),
-        neural=NeuralConfig(device=args.nn_device),
+        neural=NeuralConfig(enabled=not args.disable_neural, device=args.nn_device),
     )
     validate_xgboost_backend(config.models)
-    validate_neural_backend(config.neural)
+    if config.neural.enabled:
+        from src.neural import validate_neural_backend
+
+        validate_neural_backend(config.neural)
+    else:
+        print("[BACKEND] Neural models disabled; using XGBoost+CatBoost CPU fallback")
     build_dir = config.paths.submission_build_dir
     model_dir = build_dir / "model"
     if args.clean and build_dir.exists():

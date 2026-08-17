@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import shutil
 import subprocess
@@ -18,14 +19,25 @@ NEURAL_RUNTIME_PATH = PROJECT_ROOT / "src" / "neural.py"
 DIST_DIR = PROJECT_ROOT / "dist"
 ZIP_PATH = DIST_DIR / "submit.zip"
 
-MODEL_FILES = (
+CORE_MODEL_FILES = (
     "xgb_model.json",
     "cat_model.cbm",
-    "resnet.pt",
-    "ft_transformer.pt",
     "bundle.pkl",
     "manifest.json",
 )
+
+# DACON preinstalls these runtime libraries. Listing a different version in
+# submission/requirements.txt can replace the CUDA/Python-matched base package
+# and cause an installation failure before script.py starts.
+EVALUATION_PROVIDED_REQUIREMENTS = {
+    "joblib",
+    "numpy",
+    "pandas",
+    "scipy",
+    "scikit-learn",
+    "threadpoolctl",
+    "torch",
+}
 
 
 def _sha256(path: Path) -> str:
@@ -41,9 +53,26 @@ def _required_files() -> dict[str, Path]:
         "script.py": SUBMISSION_DIR / "script.py",
         "requirements.txt": SUBMISSION_DIR / "requirements.txt",
         "model/runtime.py": RUNTIME_PATH,
-        "model/neural_runtime.py": NEURAL_RUNTIME_PATH,
     }
-    files.update({f"model/{name}": MODEL_DIR / name for name in MODEL_FILES})
+    files.update({f"model/{name}": MODEL_DIR / name for name in CORE_MODEL_FILES})
+
+    manifest_path = MODEL_DIR / "manifest.json"
+    if not manifest_path.is_file():
+        return files
+    with manifest_path.open("r", encoding="utf-8") as handle:
+        manifest = json.load(handle)
+    model_order = list(manifest.get("model_order", ()))
+    if model_order == ["xgb", "cat"]:
+        return files
+    if model_order != ["xgb", "cat", "resnet", "ft_transformer"]:
+        raise ValueError(f"Unsupported manifest model_order: {model_order}")
+    files.update(
+        {
+            "model/neural_runtime.py": NEURAL_RUNTIME_PATH,
+            "model/resnet.pt": MODEL_DIR / "resnet.pt",
+            "model/ft_transformer.pt": MODEL_DIR / "ft_transformer.pt",
+        }
+    )
     return files
 
 
@@ -52,6 +81,26 @@ def _validate_artifacts(files: dict[str, Path]) -> None:
     if missing:
         raise FileNotFoundError(
             "Missing trained submission artifacts:\n  " + "\n  ".join(missing)
+        )
+    _validate_submission_requirements(files["requirements.txt"])
+
+
+def _validate_submission_requirements(path: Path) -> None:
+    forbidden = []
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.split("#", 1)[0].strip()
+        if not line:
+            continue
+        normalized = line.lower().replace("_", "-")
+        name = normalized
+        for marker in ("==", ">=", "<=", "~=", "!=", ">", "<", "["):
+            name = name.split(marker, 1)[0].strip()
+        if name in EVALUATION_PROVIDED_REQUIREMENTS:
+            forbidden.append(line)
+    if forbidden:
+        raise ValueError(
+            "submission/requirements.txt must use DACON's preinstalled runtime "
+            f"packages instead of reinstalling them: {forbidden}"
         )
 
 
