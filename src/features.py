@@ -177,14 +177,217 @@ class StrictPastTrackmanFeatures:
         return self.state_
 
 
+class StrictPastMainHistoryFeatures:
+    """Season-prequential pitcher context profiles from the labeled table.
+
+    A row from season S can only receive statistics computed from seasons
+    strictly earlier than S.  The hidden 2025 rows therefore use 2019--2024
+    labels, while the 2023 and 2024 validation folds remain uncontaminated.
+    All lookups are keyed by the current row only; no evaluation-row statistic
+    is ever computed.
+
+    The design follows a partial-pooling hierarchy:
+      league -> pitcher -> pitcher x count / handedness context.
+    Only centered effects are exported.  This removes the league-wide target
+    drift while retaining an individual pitcher's persistent context signal.
+    """
+
+    def __init__(self, config: FeatureConfig) -> None:
+        self.config = config
+        self.state_: Dict[str, object] | None = None
+
+    @staticmethod
+    def _normalize_id(series: pd.Series) -> pd.Series:
+        return pd.to_numeric(series, errors="coerce").fillna(-1).astype(np.int64)
+
+    @staticmethod
+    def _raw_key(raw_key) -> tuple[int, ...]:
+        key = raw_key if isinstance(raw_key, tuple) else (raw_key,)
+        return tuple(int(value) for value in key)
+
+    def _summarize_target_season(
+        self,
+        past: pd.DataFrame,
+        target_season: int,
+        group_cols: Sequence[str],
+        prefix: str,
+        strength: float,
+        league_prior: float,
+        pitcher_parent: Mapping[tuple, float] | None,
+    ) -> tuple[Dict[tuple, Dict[str, float]], Dict[tuple, float], list[str]]:
+        grouped = past.groupby(list(group_cols), observed=True, sort=False)
+        stats = grouped.agg(
+            weighted_y=("weighted_y", "sum"),
+            weighted_n=("season_weight", "sum"),
+            raw_n=("target", "size"),
+        )
+
+        is_child = pitcher_parent is not None
+        feature_names = [f"{prefix}_effect"]
+        if is_child:
+            feature_names.append(f"{prefix}_delta")
+        feature_names.extend(
+            [f"{prefix}_log_n", f"{prefix}_available"]
+        )
+        lookup: Dict[tuple, Dict[str, float]] = {}
+        rate_lookup: Dict[tuple, float] = {}
+
+        for raw_key, row in stats.iterrows():
+            key = self._raw_key(raw_key)
+            parent = (
+                float(pitcher_parent.get((key[0],), league_prior))
+                if is_child
+                else float(league_prior)
+            )
+            rate = (
+                float(row["weighted_y"]) + float(strength) * parent
+            ) / (float(row["weighted_n"]) + float(strength))
+            values = {
+                f"{prefix}_effect": float(rate - league_prior),
+                f"{prefix}_log_n": float(np.log1p(row["raw_n"])),
+                f"{prefix}_available": 1.0,
+            }
+            if is_child:
+                values[f"{prefix}_delta"] = float(rate - parent)
+            lookup[(target_season, *key)] = values
+            rate_lookup[key] = float(rate)
+
+        return lookup, rate_lookup, feature_names
+
+    def fit(self, train: pd.DataFrame, target_col: str) -> "StrictPastMainHistoryFeatures":
+        required = {
+            "season",
+            "pitcher_id",
+            "pitcher_hand",
+            "batter_hand",
+            "balls_before",
+            "strikes_before",
+            target_col,
+        }
+        missing = required - set(train.columns)
+        if missing:
+            raise ValueError(f"Missing main-history columns: {sorted(missing)}")
+
+        print("[FEATURE] Building strictly-past pitcher context profiles...")
+        pitcher_hand = train["pitcher_hand"].map(HAND_MAP)
+        pitcher_hand = pitcher_hand.fillna(
+            pd.to_numeric(train["pitcher_hand"], errors="coerce")
+        )
+        batter_hand = train["batter_hand"].map(HAND_MAP)
+        batter_hand = batter_hand.fillna(
+            pd.to_numeric(train["batter_hand"], errors="coerce")
+        )
+
+        history = pd.DataFrame(
+            {
+                "season": pd.to_numeric(train["season"], errors="raise").astype(np.int16),
+                "pitcher_id": self._normalize_id(train["pitcher_id"]),
+                "balls": pd.to_numeric(train["balls_before"], errors="coerce")
+                .fillna(-1)
+                .astype(np.int8),
+                "strikes": pd.to_numeric(train["strikes_before"], errors="coerce")
+                .fillna(-1)
+                .astype(np.int8),
+                "same_hand": (pitcher_hand == batter_hand).fillna(False).astype(np.int8),
+                "target": pd.to_numeric(train[target_col], errors="raise").astype(np.float32),
+            }
+        )
+
+        profile_specs = (
+            (
+                "pitcher",
+                ("pitcher_id",),
+                float(self.config.history_pitcher_strength),
+            ),
+            (
+                "pitcher_count",
+                ("pitcher_id", "balls", "strikes"),
+                float(self.config.history_count_strength),
+            ),
+            (
+                "pitcher_matchup",
+                ("pitcher_id", "same_hand"),
+                float(self.config.history_matchup_strength),
+            ),
+            (
+                "pitcher_count_matchup",
+                ("pitcher_id", "balls", "strikes", "same_hand"),
+                float(self.config.history_count_matchup_strength),
+            ),
+        )
+
+        profiles: Dict[str, Dict[str, object]] = {
+            name: {"lookup": {}, "feature_names": [], "defaults": {}}
+            for name, _, _ in profile_specs
+        }
+        league_priors: Dict[int, float] = {}
+        min_season = int(history["season"].min())
+        max_season = int(history["season"].max())
+
+        for target_season in range(min_season, max_season + 2):
+            past = history.loc[history["season"] < target_season].copy()
+            if past.empty:
+                continue
+            age = (target_season - 1 - past["season"]).clip(lower=0)
+            past["season_weight"] = np.power(
+                float(self.config.history_season_decay),
+                age.to_numpy(dtype=np.float64, copy=False),
+            )
+            past["weighted_y"] = (
+                past["season_weight"] * past["target"].astype(np.float64)
+            )
+            league_prior = float(past["weighted_y"].sum() / past["season_weight"].sum())
+            league_priors[target_season] = league_prior
+
+            pitcher_parent: Dict[tuple, float] | None = None
+            for name, group_cols, strength in profile_specs:
+                lookup, rates, feature_names = self._summarize_target_season(
+                    past=past,
+                    target_season=target_season,
+                    group_cols=group_cols,
+                    prefix=f"hist_{name}",
+                    strength=strength,
+                    league_prior=league_prior,
+                    pitcher_parent=pitcher_parent if name != "pitcher" else None,
+                )
+                profiles[name]["lookup"].update(lookup)
+                profiles[name]["feature_names"] = feature_names
+                profiles[name]["defaults"] = {feature: 0.0 for feature in feature_names}
+                if name == "pitcher":
+                    pitcher_parent = rates
+
+        self.state_ = {
+            "state_version": 1,
+            "source_seasons": [min_season, max_season],
+            "season_decay": float(self.config.history_season_decay),
+            "league_priors": league_priors,
+            "profiles": profiles,
+        }
+        print(
+            "[FEATURE] Main-history keys: "
+            + ", ".join(
+                f"{name}={len(profile['lookup']):,}"
+                for name, profile in profiles.items()
+            )
+        )
+        return self
+
+    def export_state(self) -> Dict[str, object]:
+        if self.state_ is None:
+            raise RuntimeError("Main-history feature builder has not been fitted.")
+        return self.state_
+
+
 class LeakageSafeFeatureEngineer:
     def __init__(
         self,
         config: FeatureConfig,
         trackman_features: StrictPastTrackmanFeatures | None = None,
+        main_history_features: StrictPastMainHistoryFeatures | None = None,
     ) -> None:
         self.config = config
         self.trackman_features = trackman_features
+        self.main_history_features = main_history_features
 
     def fit(self, df: pd.DataFrame, y=None) -> "LeakageSafeFeatureEngineer":
         # All transformations are fixed or strictly-past; no label-dependent
@@ -208,5 +411,10 @@ class LeakageSafeFeatureEngineer:
                 None
                 if self.trackman_features is None
                 else self.trackman_features.export_state()
+            ),
+            "main_history": (
+                None
+                if self.main_history_features is None
+                else self.main_history_features.export_state()
             ),
         }

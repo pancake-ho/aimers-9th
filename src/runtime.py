@@ -8,7 +8,7 @@ import pandas as pd
 
 ID_COL = "row_id"
 TARGET_COL = "control_success"
-FEATURE_VERSION = 2
+FEATURE_VERSION = 3
 
 PITCHER_RATE_COLS = (
     "asof_pitcher_success_rate",
@@ -134,6 +134,39 @@ def add_trackman_features(out: pd.DataFrame, trackman_state) -> pd.DataFrame:
     if not profile_frames:
         return out
     return pd.concat([out, *profile_frames], axis=1, copy=False)
+
+
+def add_main_history_features(out: pd.DataFrame, history_state) -> pd.DataFrame:
+    """Attach precomputed season-past profiles using only the current row key."""
+    if not history_state:
+        return out
+
+    season = _numeric(out["season"], -1).astype(int).to_numpy()
+    pitcher_id = _numeric(out["pitcher_id"], -1).astype(np.int64).to_numpy()
+    balls = _numeric(out["balls_before"], -1).astype(int).to_numpy()
+    strikes = _numeric(out["strikes_before"], -1).astype(int).to_numpy()
+    same_hand = (
+        out["pitcher_hand"].map(HAND_MAP).fillna(_numeric(out["pitcher_hand"], -1))
+        == out["batter_hand"].map(HAND_MAP).fillna(_numeric(out["batter_hand"], -1))
+    ).astype(int).to_numpy()
+
+    profiles = history_state.get("profiles", {})
+    profile_keys = {
+        "pitcher": list(zip(season, pitcher_id)),
+        "pitcher_count": list(zip(season, pitcher_id, balls, strikes)),
+        "pitcher_matchup": list(zip(season, pitcher_id, same_hand)),
+        "pitcher_count_matchup": list(
+            zip(season, pitcher_id, balls, strikes, same_hand)
+        ),
+    }
+    frames = []
+    for name, keys in profile_keys.items():
+        profile = profiles.get(name)
+        if profile:
+            frames.append(_lookup_trackman_profile(out.index, profile, keys))
+    if not frames:
+        return out
+    return pd.concat([out, *frames], axis=1, copy=False)
 
 
 def build_features(df: pd.DataFrame, feature_state: Mapping[str, object]) -> pd.DataFrame:
@@ -310,7 +343,58 @@ def build_features(df: pd.DataFrame, feature_state: Mapping[str, object]) -> pd.
     out["pitchmix_max_share"] = pitchmix.max(axis=1).astype(np.float32)
     out["pitchmix_missing"] = (pitchmix_n <= 0).astype(np.int8)
 
-    return add_trackman_features(out, feature_state.get("trackman"))
+    out = add_trackman_features(out, feature_state.get("trackman"))
+    out = add_main_history_features(out, feature_state.get("main_history"))
+
+    # A cross-season empirical-Bayes prior is most valuable early in a season,
+    # when the official within-season asof count is small.  Context deltas are
+    # added to the already-smoothed current-season baseline, so a league-wide
+    # target shift does not get copied from older seasons.
+    if "hist_pitcher_effect" in out.columns:
+        history_available = _numeric(out["hist_pitcher_available"], 0.0)
+        history_prior = (
+            prior + _numeric(out["hist_pitcher_effect"], 0.0)
+        ).clip(0.02, 0.98)
+        history_prior = history_prior.where(history_available > 0.0, prior)
+        current_rate = _numeric(out["asof_pitcher_success_rate"], prior).clip(0.0, 1.0)
+        for strength in (100.0, 300.0):
+            out[f"cross_season_success_s{int(strength)}"] = (
+                (pitcher_n * current_rate + strength * history_prior)
+                / (pitcher_n + strength)
+            ).astype(np.float32)
+
+        for context in (
+            "pitcher_count",
+            "pitcher_matchup",
+            "pitcher_count_matchup",
+        ):
+            delta_col = f"hist_{context}_delta"
+            if delta_col in out.columns:
+                out[f"{context}_adjusted_success"] = (
+                    baseline_success + _numeric(out[delta_col], 0.0)
+                ).clip(0.02, 0.98).astype(np.float32)
+
+        zero = pd.Series(0.0, index=out.index, dtype=np.float32)
+        out["history_context_spread"] = (
+            _numeric(out["hist_pitcher_count_delta"], 0.0).abs()
+            if "hist_pitcher_count_delta" in out.columns
+            else zero
+        )
+        out["history_context_spread"] = (
+            out["history_context_spread"]
+            + (
+                _numeric(out["hist_pitcher_matchup_delta"], 0.0).abs()
+                if "hist_pitcher_matchup_delta" in out.columns
+                else zero
+            )
+            + (
+                _numeric(out["hist_pitcher_count_matchup_delta"], 0.0).abs()
+                if "hist_pitcher_count_matchup_delta" in out.columns
+                else zero
+            )
+        ).astype(np.float32)
+
+    return out
 
 
 def preprocess_frame(df: pd.DataFrame, state: Mapping[str, object]) -> pd.DataFrame:

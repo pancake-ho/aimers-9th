@@ -50,6 +50,16 @@ class FeatureConfig:
     batter_prior_strength: float = 50.0
     cold_start_threshold: int = 50
 
+    # Strictly-past cross-season target profiles.  These expose stable,
+    # pitcher-specific context effects to every model while retaining the
+    # official row-independence contract.  Older seasons are discounted and
+    # sparse child contexts are partially pooled toward the pitcher profile.
+    history_season_decay: float = 0.70
+    history_pitcher_strength: float = 150.0
+    history_count_strength: float = 60.0
+    history_matchup_strength: float = 90.0
+    history_count_matchup_strength: float = 100.0
+
     # All are fitted on training rows only. High-cardinality player IDs are
     # intentionally categorical: CatBoost's ordered statistics can use them
     # without hand-written target encoding.

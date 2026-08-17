@@ -21,6 +21,11 @@ class ConfigContractTests(unittest.TestCase):
             0,
         )
         self.assertEqual(config.ensemble_grid_step, 0.025)
+        self.assertEqual(config.features.history_season_decay, 0.70)
+        self.assertLess(
+            config.features.history_count_strength,
+            config.features.history_pitcher_strength,
+        )
 
     def test_neural_training_can_be_disabled_without_changing_model_defaults(self) -> None:
         enabled = NeuralConfig()

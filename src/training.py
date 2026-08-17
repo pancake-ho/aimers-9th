@@ -15,7 +15,11 @@ from src.calibration import (
     select_stable_weights,
 )
 from src.config import ExperimentConfig
-from src.features import LeakageSafeFeatureEngineer, StrictPastTrackmanFeatures
+from src.features import (
+    LeakageSafeFeatureEngineer,
+    StrictPastMainHistoryFeatures,
+    StrictPastTrackmanFeatures,
+)
 from src.metrics import evaluate_probabilities
 from src.models import (
     GBDT_MODEL_ORDER,
@@ -50,7 +54,7 @@ def _strategy_name(model_order: tuple[str, ...]) -> str:
     if model_order == GBDT_MODEL_ORDER:
         return "temporal_xgb_cat_probability_bias_cpu_fallback_v1"
     if model_order == (*GBDT_MODEL_ORDER, "resnet"):
-        return "temporal_xgb_cat_resnet_probability_bias_v4"
+        return "temporal_xgb_cat_resnet_hierarchical_history_v5"
     if model_order == (*GBDT_MODEL_ORDER, *NEURAL_MODEL_ORDER):
         return "temporal_gbdt_resnet_ftt_probability_bias_v3"
     raise ValueError(f"Unsupported model order: {model_order}")
@@ -76,7 +80,15 @@ def build_feature_table(
             raise FileNotFoundError(config.paths.trackman_path)
         trackman = StrictPastTrackmanFeatures().fit_from_csv(config.paths.trackman_path)
 
-    engineer = LeakageSafeFeatureEngineer(config.features, trackman_features=trackman)
+    main_history = StrictPastMainHistoryFeatures(config.features).fit(
+        train,
+        target_col=config.features.target_col,
+    )
+    engineer = LeakageSafeFeatureEngineer(
+        config.features,
+        trackman_features=trackman,
+        main_history_features=main_history,
+    )
     state = engineer.export_runtime_state()
     print("[FEATURE] Building row-wise main-table features...")
     features = engineer.transform(train)
