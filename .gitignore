@@ -14,3 +14,9 @@ __pycache__/
 # OS / IDE
 .vscode/
 .DS_Store
+
+# Output DATA
+outputs/
+submission_build/
+dist/
+*.zip

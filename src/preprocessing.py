@@ -5,8 +5,16 @@ from typing import Dict, List, Sequence
 import numpy as np
 import pandas as pd
 
+from src.runtime import preprocess_frame
+
 
 class TabularPreprocessor:
+    """Train-fitted ordinal coding and median imputation.
+
+    Category vocabularies and numeric medians are learned only from the
+    training side of each temporal fold. Unknown future categories map to -1.
+    """
+
     def __init__(
         self,
         categorical_cols: Sequence[str],
@@ -20,22 +28,28 @@ class TabularPreprocessor:
         self.numeric_medians_: Dict[str, float] = {}
         self.feature_names_: List[str] = []
 
+    @property
+    def categorical_indices(self) -> list[int]:
+        return [self.feature_names_.index(col) for col in self.cat_cols_]
+
     def fit(self, df: pd.DataFrame) -> "TabularPreprocessor":
         self.cat_cols_ = [
-            c for c in self.requested_cat_cols
-            if c in df.columns and c not in self.excluded_cols
+            col
+            for col in self.requested_cat_cols
+            if col in df.columns and col not in self.excluded_cols
         ]
-        numeric_candidates = df.select_dtypes(include=[np.number]).columns.tolist()
+        numeric_candidates = df.select_dtypes(include=[np.number, "bool"]).columns.tolist()
         self.num_cols_ = [
-            c for c in numeric_candidates
-            if c not in self.excluded_cols and c not in self.cat_cols_
+            col
+            for col in numeric_candidates
+            if col not in self.excluded_cols and col not in self.cat_cols_
         ]
 
         self.category_maps_.clear()
         for col in self.cat_cols_:
             values = df[col].fillna("__MISSING__").astype(str)
             self.category_maps_[col] = {
-                value: idx for idx, value in enumerate(pd.unique(values))
+                value: index for index, value in enumerate(pd.unique(values))
             }
 
         self.numeric_medians_.clear()
@@ -45,34 +59,25 @@ class TabularPreprocessor:
             self.numeric_medians_[col] = float(median) if np.isfinite(median) else 0.0
 
         self.feature_names_ = self.cat_cols_ + self.num_cols_
+        if len(self.feature_names_) != len(set(self.feature_names_)):
+            raise RuntimeError("Duplicate preprocessed feature name.")
         print(
             f"[PREPROCESS] categorical={len(self.cat_cols_)}, "
-            f"numerical={len(self.num_cols_)}"
+            f"numerical={len(self.num_cols_)}, total={len(self.feature_names_)}"
         )
         return self
 
     def transform(self, df: pd.DataFrame) -> pd.DataFrame:
         if not self.feature_names_:
             raise RuntimeError("Preprocessor must be fitted before transform().")
-
-        result: Dict[str, pd.Series] = {}
-        for col in self.cat_cols_:
-            values = df[col].fillna("__MISSING__").astype(str)
-            result[col] = (
-                values.map(self.category_maps_[col]).fillna(-1).astype(np.int32)
-            )
-
-        for col in self.num_cols_:
-            values = pd.to_numeric(df[col], errors="coerce")
-            result[col] = values.fillna(self.numeric_medians_[col]).astype(np.float32)
-
-        return pd.DataFrame(result, index=df.index)[self.feature_names_]
+        return preprocess_frame(df, self.export_state())
 
     def fit_transform(self, df: pd.DataFrame) -> pd.DataFrame:
         return self.fit(df).transform(df)
 
     def export_state(self) -> Dict[str, object]:
         return {
+            "state_version": 1,
             "cat_cols": list(self.cat_cols_),
             "num_cols": list(self.num_cols_),
             "feature_names": list(self.feature_names_),
