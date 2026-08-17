@@ -244,6 +244,21 @@ else
     echo "[MODE] gbdt_cpu_fallback"
 fi
 
+echo "[PREFLIGHT] Validating DACON submission requirements before training"
+(
+    cd "${PROJECT_DIR}"
+    python - <<'PY'
+from scripts.build_submit import (
+    SUBMISSION_DIR,
+    _validate_submission_requirements,
+)
+
+path = SUBMISSION_DIR / "requirements.txt"
+_validate_submission_requirements(path)
+print(f"[PREFLIGHT] PASS requirements={path}")
+PY
+)
+
 echo "[STAGE] Copying source code to ${LOCAL_PROJECT}"
 rsync -a \
     --exclude=".git/" \

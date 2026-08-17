@@ -41,6 +41,15 @@ class RunScriptContractTests(unittest.TestCase):
         self.assertNotIn("exit 71", script)
         self.assertNotIn("exit 72", script)
 
+    def test_submission_requirements_are_checked_before_training(self) -> None:
+        script = (PROJECT_ROOT / "run" / "run.sh").read_text(encoding="utf-8")
+
+        self.assertIn("_validate_submission_requirements", script)
+        self.assertLess(
+            script.index("_validate_submission_requirements"),
+            script.index("python scripts/train_submit.py"),
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
