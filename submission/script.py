@@ -21,11 +21,11 @@ ID_COL = "row_id"
 TARGET_COL = "control_success"
 
 
-def _load_runtime_module():
-    path = MODEL_DIR / "runtime.py"
+def _load_module(filename: str, module_name: str):
+    path = MODEL_DIR / filename
     if not path.exists():
         raise FileNotFoundError(path)
-    spec = importlib.util.spec_from_file_location("aimers_runtime", path)
+    spec = importlib.util.spec_from_file_location(module_name, path)
     if spec is None or spec.loader is None:
         raise ImportError(f"Cannot load runtime module: {path}")
     module = importlib.util.module_from_spec(spec)
@@ -39,7 +39,7 @@ def _load_csv(path: Path) -> pd.DataFrame:
 
 
 def _validate_inputs(test: pd.DataFrame, sample: pd.DataFrame, bundle) -> None:
-    if bundle.get("bundle_version") != 2:
+    if bundle.get("bundle_version") != 3:
         raise ValueError(f"Unsupported bundle version: {bundle.get('bundle_version')}")
     if bundle.get("id_col") != ID_COL or bundle.get("target_col") != TARGET_COL:
         raise ValueError("Bundle column contract does not match the competition contract.")
@@ -60,7 +60,7 @@ def _validate_inputs(test: pd.DataFrame, sample: pd.DataFrame, bundle) -> None:
         raise ValueError(f"test.csv is missing trained columns: {sorted(missing)}")
 
 
-def _load_models():
+def _load_gbdt_models():
     xgb_path = MODEL_DIR / "xgb_model.json"
     cat_path = MODEL_DIR / "cat_model.cbm"
     if not xgb_path.exists() or not cat_path.exists():
@@ -77,40 +77,71 @@ def _load_models():
 
 def main() -> None:
     started = time.perf_counter()
-    print("[1/7] Load immutable model bundle and runtime")
+    print("[1/8] Load immutable model bundle and runtimes")
     bundle = joblib.load(MODEL_DIR / "bundle.pkl")
-    runtime = _load_runtime_module()
+    runtime = _load_module("runtime.py", "aimers_runtime")
+    neural = _load_module("neural_runtime.py", "aimers_neural_runtime")
+    neural.torch.set_num_threads(6)
 
-    print("[2/7] Load and validate official inputs")
+    print("[2/8] Load and validate official inputs")
     test = _load_csv(DATA_DIR / "test.csv")
     sample = _load_csv(DATA_DIR / "sample_submission.csv")
     _validate_inputs(test, sample, bundle)
     row_ids = test[ID_COL].copy()
 
-    print(f"[3/7] Build row-independent features: rows={len(test):,}")
+    print(f"[3/8] Build row-independent features: rows={len(test):,}")
     features = runtime.build_features(test, bundle["feature_state"])
     del test
     gc.collect()
 
-    print("[4/7] Apply train-fitted encoding and imputation")
+    print("[4/8] Apply train-fitted encoding and imputation")
     X = runtime.preprocess_frame(features, bundle["preprocessor_state"])
     del features
     gc.collect()
 
-    print(f"[5/7] Predict XGBoost + CatBoost: features={X.shape[1]}")
-    xgb_model, cat_model = _load_models()
+    print(f"[5/8] Predict XGBoost + CatBoost: features={X.shape[1]}")
+    xgb_model, cat_model = _load_gbdt_models()
     dtest = xgb.DMatrix(X, feature_names=list(X.columns))
     xgb_prediction = np.asarray(xgb_model.predict(dtest), dtype=np.float64)
     cat_prediction = np.asarray(cat_model.predict_proba(X)[:, 1], dtype=np.float64)
-    del dtest, X, xgb_model, cat_model
+    del dtest, xgb_model, cat_model
     gc.collect()
 
-    print("[6/7] Blend and apply prequential calibration")
+    print("[6/8] Predict tabular ResNet + FT-Transformer on CPU")
+    neural_arrays = neural.prepare_neural_arrays(
+        X, bundle["neural_preprocessor_state"]
+    )
+    resnet_model = neural.load_checkpoint(MODEL_DIR / "resnet.pt", device="cpu")
+    resnet_prediction = neural.predict_model(
+        resnet_model, neural_arrays, device="cpu", batch_size=8192
+    )
+    del resnet_model
+    ft_model = neural.load_checkpoint(
+        MODEL_DIR / "ft_transformer.pt", device="cpu"
+    )
+    ft_prediction = neural.predict_model(
+        ft_model, neural_arrays, device="cpu", batch_size=2048
+    )
+    del ft_model, neural_arrays, X
+    gc.collect()
+
+    print("[7/8] Blend and apply prequential calibration")
     ensemble = bundle["ensemble"]
-    if list(ensemble["model_order"]) != ["xgb", "cat"]:
+    if list(ensemble["model_order"]) != [
+        "xgb",
+        "cat",
+        "resnet",
+        "ft_transformer",
+    ]:
         raise ValueError(f"Unsupported model order: {ensemble['model_order']}")
     prediction = runtime.blend_predictions(
-        [xgb_prediction, cat_prediction], ensemble["weights"]
+        [
+            xgb_prediction,
+            cat_prediction,
+            resnet_prediction,
+            ft_prediction,
+        ],
+        ensemble["weights"],
     )
     calibration = ensemble["calibration"]
     if calibration.get("accepted", False):
@@ -125,7 +156,7 @@ def main() -> None:
     if ((prediction <= 0.0) | (prediction >= 1.0)).any():
         raise ValueError("Prediction is outside the open probability interval (0, 1).")
 
-    print("[7/7] Restore official sample order and write submission.csv")
+    print("[8/8] Restore official sample order and write submission.csv")
     prediction_by_id = pd.DataFrame({ID_COL: row_ids, TARGET_COL: prediction})
     submission = sample[[ID_COL]].merge(
         prediction_by_id,

@@ -11,7 +11,7 @@ from catboost import CatBoostClassifier
 from src.config import ModelConfig
 
 
-MODEL_ORDER = ("xgb", "cat")
+MODEL_ORDER = ("xgb", "cat", "resnet", "ft_transformer")
 
 
 def _xgb_brier_metric(prediction, dmatrix):
@@ -34,7 +34,7 @@ def _xgb_params(config: ModelConfig) -> dict:
         "gamma": 0.0,
         "tree_method": "hist",
         "max_bin": int(config.xgb_max_bin),
-        "device": "cpu",
+        "device": config.xgb_device.lower(),
         "seed": config.random_seed,
         "nthread": config.num_threads,
         "verbosity": 1,
@@ -74,6 +74,8 @@ def validate_xgboost_backend(config: ModelConfig) -> None:
     """
     if int(config.xgb_max_bin) < 2:
         raise ValueError(f"xgb_max_bin must be >= 2; got {config.xgb_max_bin}")
+    if config.xgb_device.lower() not in {"cpu", "cuda"}:
+        raise ValueError(f"xgb_device must be cpu or cuda; got {config.xgb_device}")
 
     X_probe = pd.DataFrame(
         {
@@ -91,7 +93,8 @@ def validate_xgboost_backend(config: ModelConfig) -> None:
         raise RuntimeError("XGBoost backend preflight returned invalid predictions.")
     print(
         f"[BACKEND] XGBoost {xgb.__version__} preflight PASS "
-        f"(QuantileDMatrix/hist max_bin={config.xgb_max_bin})"
+        f"(device={config.xgb_device.lower()}, "
+        f"QuantileDMatrix/hist max_bin={config.xgb_max_bin})"
     )
     del probe_model, dprobe, X_probe, y_probe, prediction
     gc.collect()

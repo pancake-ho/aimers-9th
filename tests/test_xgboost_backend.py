@@ -27,7 +27,7 @@ class XGBoostBackendContractTests(unittest.TestCase):
         import numpy as np
         import pandas as pd
 
-        config = ModelConfig(xgb_max_bin=257, num_threads=1)
+        config = ModelConfig(xgb_max_bin=257, xgb_device="cpu", num_threads=1)
         X = pd.DataFrame(
             {
                 "a": np.asarray([0, 1, 2, 3], dtype=np.float32),

@@ -11,7 +11,6 @@ import numpy as np
 import pandas as pd
 
 from src.calibration import (
-    brier_score,
     fit_prequential_bias_calibrator,
     select_stable_weights,
 )
@@ -24,6 +23,15 @@ from src.models import (
     train_catboost_full,
     train_xgboost_fold,
     train_xgboost_full,
+)
+from src.neural import (
+    NEURAL_MODEL_ORDER,
+    NeuralPreprocessor,
+    prepare_neural_arrays,
+    release_torch_memory,
+    save_checkpoint,
+    train_neural_fold,
+    train_neural_full,
 )
 from src.preprocessing import TabularPreprocessor
 from src.runtime import apply_probability_bias, blend_predictions
@@ -117,7 +125,40 @@ def run_temporal_validation(
         per_model_metrics["cat"] = evaluate_probabilities(y_valid, predictions["cat"])
         per_model_metrics["cat"]["train_seconds"] = float(elapsed)
         _print_metrics(f"{fold.valid_season}/cat", per_model_metrics["cat"])
-        del cat_model, X_train, X_valid, sample_weight
+        del cat_model
+        gc.collect()
+
+        neural_preprocessor = NeuralPreprocessor(
+            categorical_cols=preprocessor.cat_cols_,
+            numerical_cols=preprocessor.num_cols_,
+        ).fit(X_train)
+        neural_state = neural_preprocessor.export_state()
+        train_arrays = prepare_neural_arrays(X_train, neural_state)
+        valid_arrays = prepare_neural_arrays(X_valid, neural_state)
+
+        for offset, kind in enumerate(NEURAL_MODEL_ORDER, start=1):
+            start = time.perf_counter()
+            neural_model, prediction, best_epoch, _ = train_neural_fold(
+                kind=kind,
+                train_arrays=train_arrays,
+                y_train=y_train,
+                sample_weight=sample_weight,
+                valid_arrays=valid_arrays,
+                y_valid=y_valid,
+                neural_state=neural_state,
+                config=config.neural,
+                random_seed=config.models.random_seed + 100 * offset + fold.valid_season,
+            )
+            elapsed = time.perf_counter() - start
+            predictions[kind] = prediction
+            best_iterations[kind] = int(best_epoch)
+            per_model_metrics[kind] = evaluate_probabilities(y_valid, prediction)
+            per_model_metrics[kind]["train_seconds"] = float(elapsed)
+            _print_metrics(f"{fold.valid_season}/{kind}", per_model_metrics[kind])
+            del neural_model, prediction
+            release_torch_memory()
+
+        del X_train, X_valid, sample_weight, train_arrays, valid_arrays, neural_state
         gc.collect()
 
         fold_results.append(
@@ -136,7 +177,11 @@ def run_temporal_validation(
     if len(fold_results) != 2:
         raise RuntimeError("This submission strategy requires 2023 and 2024 holdouts.")
 
-    weights, weight_report = select_stable_weights(fold_results, step=0.01)
+    weights, weight_report = select_stable_weights(
+        fold_results,
+        fold_importance=config.temporal_fold_importance,
+        step=config.ensemble_grid_step,
+    )
     calibrator = fit_prequential_bias_calibrator(
         earlier_fold=fold_results[0],
         recent_fold=fold_results[1],
@@ -191,6 +236,18 @@ def run_temporal_validation(
                 max(50, round(recent_iterations["cat"] * 1.05)),
             )
         ),
+        "resnet": int(
+            min(
+                config.neural.max_epochs,
+                max(2, round(recent_iterations["resnet"] * 1.05)),
+            )
+        ),
+        "ft_transformer": int(
+            min(
+                config.neural.max_epochs,
+                max(2, round(recent_iterations["ft_transformer"] * 1.05)),
+            )
+        ),
     }
 
     ensemble_state = {
@@ -200,7 +257,7 @@ def run_temporal_validation(
         "final_iterations": final_iterations,
     }
     report = {
-        "strategy": "temporal_xgb_cat_probability_bias_v2",
+        "strategy": "temporal_gbdt_resnet_ftt_probability_bias_v3",
         "folds": fold_summaries,
         "weight_selection": weight_report,
         "calibration": calibrator,
@@ -255,17 +312,47 @@ def train_and_save_final_models(
     )
     cat_path = model_dir / "cat_model.cbm"
     cat_model.save_model(str(cat_path))
-    del cat_model, X, sample_weight
+    del cat_model
+    gc.collect()
+
+    neural_preprocessor = NeuralPreprocessor(
+        categorical_cols=preprocessor.cat_cols_,
+        numerical_cols=preprocessor.num_cols_,
+    ).fit(X)
+    neural_state = neural_preprocessor.export_state()
+    train_arrays = prepare_neural_arrays(X, neural_state)
+    neural_paths: Dict[str, Path] = {}
+    for offset, kind in enumerate(NEURAL_MODEL_ORDER, start=1):
+        epochs = int(ensemble_state["final_iterations"][kind])
+        print(f"[FINAL] Training {kind} for {epochs} epochs...")
+        neural_model, model_spec = train_neural_full(
+            kind=kind,
+            train_arrays=train_arrays,
+            y_train=y,
+            sample_weight=sample_weight,
+            neural_state=neural_state,
+            config=config.neural,
+            random_seed=config.models.random_seed + 100 * offset + 2025,
+            epochs=epochs,
+        )
+        neural_path = model_dir / f"{kind}.pt"
+        save_checkpoint(neural_path, neural_model, model_spec)
+        neural_paths[kind] = neural_path
+        del neural_model
+        release_torch_memory()
+
+    del X, sample_weight, train_arrays
     gc.collect()
 
     raw_feature_cols = [col for col in train.columns if col != target]
     bundle = {
-        "bundle_version": 2,
+        "bundle_version": 3,
         "id_col": config.features.id_col,
         "target_col": target,
         "expected_raw_columns": raw_feature_cols,
         "feature_state": dict(feature_state),
         "preprocessor_state": preprocessor.export_state(),
+        "neural_preprocessor_state": neural_state,
         "ensemble": dict(ensemble_state),
         "training": {
             "train_seasons": [int(train["season"].min()), int(train["season"].max())],
@@ -278,14 +365,20 @@ def train_and_save_final_models(
     joblib.dump(bundle, bundle_path, compress=3)
 
     manifest = {
-        "strategy": "temporal_xgb_cat_probability_bias_v2",
-        "bundle_version": 2,
+        "strategy": "temporal_gbdt_resnet_ftt_probability_bias_v3",
+        "bundle_version": 3,
         "model_order": list(ensemble_state["model_order"]),
         "weights": list(ensemble_state["weights"]),
         "calibration": dict(ensemble_state["calibration"]),
         "final_iterations": dict(ensemble_state["final_iterations"]),
         "n_features": int(len(preprocessor.feature_names_)),
-        "model_files": [xgb_path.name, cat_path.name, bundle_path.name],
+        "model_files": [
+            xgb_path.name,
+            cat_path.name,
+            neural_paths["resnet"].name,
+            neural_paths["ft_transformer"].name,
+            bundle_path.name,
+        ],
     }
     with open(model_dir / "manifest.json", "w", encoding="utf-8") as handle:
         json.dump(manifest, handle, indent=2, ensure_ascii=False)

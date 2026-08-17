@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 from typing import Dict, Mapping, Sequence
 
 import numpy as np
@@ -21,20 +20,40 @@ def probability_bias(y_true, prediction) -> float:
     return float(np.mean(pred - y))
 
 
-def _candidate_weights(step: float = 0.01):
-    if MODEL_ORDER != ("xgb", "cat"):
-        raise RuntimeError("Weight grid is defined for the xgb/cat pair.")
+def _integer_compositions(total: int, parts: int):
+    if parts == 1:
+        yield (total,)
+        return
+    for first in range(total + 1):
+        for remainder in _integer_compositions(total - first, parts - 1):
+            yield (first, *remainder)
+
+
+def _candidate_weights(step: float = 0.05):
     n_steps = int(round(1.0 / step))
-    for index in range(n_steps + 1):
-        xgb_weight = index / n_steps
-        yield np.asarray([xgb_weight, 1.0 - xgb_weight], dtype=np.float64)
+    if n_steps <= 0 or not np.isclose(n_steps * step, 1.0):
+        raise ValueError("Ensemble step must divide one exactly.")
+    for composition in _integer_compositions(n_steps, len(MODEL_ORDER)):
+        yield np.asarray(composition, dtype=np.float64) / n_steps
 
 
 def select_stable_weights(
     folds: Sequence[Mapping[str, object]],
-    step: float = 0.01,
+    fold_importance: Sequence[float],
+    step: float = 0.05,
 ) -> tuple[np.ndarray, Dict[str, object]]:
-    """Minimize the equally weighted mean Brier across temporal folds."""
+    """Minimize a regime-aware forward Brier objective.
+
+    The hidden target is 2025 and 2024 is the only holdout from the same ABS
+    era. The 2023 fold remains in the objective as a stability guard, while
+    2024 receives the larger, predeclared importance.
+    """
+    importance = np.asarray(fold_importance, dtype=np.float64)
+    if importance.shape != (len(folds),):
+        raise ValueError("fold_importance must match the number of folds.")
+    if (importance < 0).any() or not np.isfinite(importance).all() or importance.sum() <= 0:
+        raise ValueError("fold_importance must be finite and non-negative.")
+    importance /= importance.sum()
     best_weights = None
     best_score = np.inf
     best_fold_scores = None
@@ -47,7 +66,7 @@ def select_stable_weights(
                 weights,
             )
             fold_scores.append(brier_score(fold["y_true"], prediction))
-        score = float(np.mean(fold_scores))
+        score = float(np.dot(importance, np.asarray(fold_scores)))
         if score < best_score:
             best_score = score
             best_weights = weights.copy()
@@ -58,8 +77,9 @@ def select_stable_weights(
     report = {
         "model_order": list(MODEL_ORDER),
         "weights": best_weights.tolist(),
-        "mean_temporal_brier": best_score,
+        "forward_weighted_brier": best_score,
         "fold_brier": [float(value) for value in best_fold_scores],
+        "fold_importance": importance.tolist(),
         "grid_step": float(step),
     }
     return best_weights, report

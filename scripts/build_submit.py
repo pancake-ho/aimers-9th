@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import shutil
 import subprocess
 import sys
@@ -13,12 +14,15 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 MODEL_DIR = PROJECT_ROOT / "submission_build" / "model"
 SUBMISSION_DIR = PROJECT_ROOT / "submission"
 RUNTIME_PATH = PROJECT_ROOT / "src" / "runtime.py"
+NEURAL_RUNTIME_PATH = PROJECT_ROOT / "src" / "neural.py"
 DIST_DIR = PROJECT_ROOT / "dist"
 ZIP_PATH = DIST_DIR / "submit.zip"
 
 MODEL_FILES = (
     "xgb_model.json",
     "cat_model.cbm",
+    "resnet.pt",
+    "ft_transformer.pt",
     "bundle.pkl",
     "manifest.json",
 )
@@ -37,6 +41,7 @@ def _required_files() -> dict[str, Path]:
         "script.py": SUBMISSION_DIR / "script.py",
         "requirements.txt": SUBMISSION_DIR / "requirements.txt",
         "model/runtime.py": RUNTIME_PATH,
+        "model/neural_runtime.py": NEURAL_RUNTIME_PATH,
     }
     files.update({f"model/{name}": MODEL_DIR / name for name in MODEL_FILES})
     return files
@@ -51,8 +56,14 @@ def _validate_artifacts(files: dict[str, Path]) -> None:
 
 
 def _smoke_test(zip_path: Path) -> None:
-    test_path = PROJECT_ROOT / "baseline" / "data" / "test.csv"
-    sample_path = PROJECT_ROOT / "baseline" / "data" / "sample_submission.csv"
+    configured_data_dir = os.environ.get("AIMERS_DATA_DIR")
+    data_dir = (
+        Path(configured_data_dir).expanduser().resolve()
+        if configured_data_dir
+        else PROJECT_ROOT / "baseline" / "data"
+    )
+    test_path = data_dir / "test.csv"
+    sample_path = data_dir / "sample_submission.csv"
     if not test_path.is_file() or not sample_path.is_file():
         print("[SMOKE] skipped: baseline/data test or sample_submission is absent")
         return
