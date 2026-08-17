@@ -57,6 +57,27 @@ export MKL_NUM_THREADS="${SLURM_CPUS_PER_GPU:-16}"
 export NUMEXPR_NUM_THREADS="${SLURM_CPUS_PER_GPU:-16}"
 export TOKENIZERS_PARALLELISM=false
 
+# A CUDA toolkit's stub libcuda is only for linking. If a shell startup file
+# accidentally adds a */stubs directory to LD_LIBRARY_PATH, CUDA applications
+# can load the stub instead of the compute-node driver and fail at cuInit().
+if [[ -n "${LD_LIBRARY_PATH:-}" ]]; then
+    clean_ld_library_path=""
+    IFS=':' read -r -a ld_paths <<< "${LD_LIBRARY_PATH}"
+    for ld_path in "${ld_paths[@]}"; do
+        [[ -z "${ld_path}" ]] && continue
+        if [[ "${ld_path}" == */stubs || "${ld_path}" == */stubs/ ]]; then
+            echo "[ENV] Removing CUDA stub path from LD_LIBRARY_PATH: ${ld_path}"
+            continue
+        fi
+        if [[ -z "${clean_ld_library_path}" ]]; then
+            clean_ld_library_path="${ld_path}"
+        else
+            clean_ld_library_path="${clean_ld_library_path}:${ld_path}"
+        fi
+    done
+    export LD_LIBRARY_PATH="${clean_ld_library_path}"
+fi
+
 CONDA_SH="/data/${USER}/anaconda3/etc/profile.d/conda.sh"
 if [[ ! -f "${CONDA_SH}" ]]; then
     echo "[ERROR] Conda initialization file not found: ${CONDA_SH}"
@@ -69,6 +90,8 @@ echo "[ENV] conda=${CONDA_DEFAULT_ENV:-unknown}"
 echo "[ENV] python=$(which python)"
 python --version
 python - <<'PY'
+import sys
+
 import catboost
 import numpy
 import pandas
@@ -81,18 +104,110 @@ print(f"[ENV] xgboost={xgboost.__version__}")
 print(f"[ENV] catboost={catboost.__version__}")
 print(f"[ENV] torch={torch.__version__}")
 print(f"[ENV] torch_cuda_build={torch.version.cuda}")
+
+torch_base_version = torch.__version__.split("+", 1)[0]
+if torch_base_version != "2.5.1" or torch.version.cuda != "12.1":
+    print(
+        "[ERROR] Incompatible PyTorch build. "
+        "Expected torch=2.5.1+cu121 and torch.version.cuda=12.1.",
+        file=sys.stderr,
+    )
+    print(
+        "[FIX] Run from the login node: bash run/fix_torch_env.sh",
+        file=sys.stderr,
+    )
+    raise SystemExit(65)
 PY
 
 echo "[RESOURCE] CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-unset}"
-nvidia-smi
+if ! nvidia-smi; then
+    echo "[ERROR] NVIDIA driver could not open the allocated GPU on $(hostname -s)."
+    echo "[ERROR] This is a compute-node/driver failure; training has not started."
+    echo "[FIX] Resubmit on another node or report host=$(hostname -s), job=${JOB_ID} to the Seraph administrator."
+    exit 70
+fi
+nvidia-smi -L || true
+
+echo "[GPU-DIAG] NVIDIA device nodes"
+for device_node in /dev/nvidiactl /dev/nvidia-uvm /dev/nvidia-uvm-tools; do
+    if [[ -e "${device_node}" ]]; then
+        ls -l "${device_node}"
+    else
+        echo "[GPU-DIAG] MISSING ${device_node}"
+    fi
+done
+for device_node in /dev/nvidia[0-9]*; do
+    [[ -e "${device_node}" ]] && ls -l "${device_node}"
+done
+
+echo "[GPU-DIAG] Direct CUDA Driver API initialization"
+python - <<'PY'
+import ctypes
+import ctypes.util
+import os
+import socket
+import sys
+
+library = ctypes.util.find_library("cuda") or "libcuda.so.1"
+print(f"[GPU-DIAG] libcuda={library}")
+print(f"[GPU-DIAG] LD_LIBRARY_PATH={os.environ.get('LD_LIBRARY_PATH', '')}")
+
+try:
+    cuda = ctypes.CDLL(library)
+except OSError as exc:
+    print(f"[ERROR] Cannot load NVIDIA libcuda.so.1: {exc}", file=sys.stderr)
+    raise SystemExit(71)
+
+cuda.cuInit.argtypes = [ctypes.c_uint]
+cuda.cuInit.restype = ctypes.c_int
+result = int(cuda.cuInit(0))
+
+name = ctypes.c_char_p()
+description = ctypes.c_char_p()
+if hasattr(cuda, "cuGetErrorName"):
+    cuda.cuGetErrorName(result, ctypes.byref(name))
+if hasattr(cuda, "cuGetErrorString"):
+    cuda.cuGetErrorString(result, ctypes.byref(description))
+
+error_name = name.value.decode() if name.value else "UNKNOWN"
+error_description = description.value.decode() if description.value else "no description"
+print(
+    f"[GPU-DIAG] cuInit_result={result} "
+    f"name={error_name} description={error_description}"
+)
+
+if result != 0:
+    print(
+        "[ERROR] CUDA Driver API initialization failed before PyTorch. "
+        f"host={socket.gethostname()} job={os.environ.get('SLURM_JOB_ID', 'unknown')}",
+        file=sys.stderr,
+    )
+    print(
+        "[ERROR] nvidia-smi success does not prove that CUDA compute/UVM is usable. "
+        "This node requires administrator repair or a different allocation.",
+        file=sys.stderr,
+    )
+    raise SystemExit(71)
+PY
+
 free -h
 df -h /local_datasets
 
 echo "[GPU-PROBE] Testing PyTorch CUDA initialization"
 python - <<'PY'
+import os
+import socket
+import sys
+
 import torch
 
-assert torch.cuda.is_available(), "torch.cuda.is_available() is false"
+if not torch.cuda.is_available():
+    print(
+        "[ERROR] torch.cuda.is_available() is false after a successful cuInit. "
+        f"host={socket.gethostname()} job={os.environ.get('SLURM_JOB_ID', 'unknown')}",
+        file=sys.stderr,
+    )
+    raise SystemExit(72)
 device = torch.device("cuda")
 x = torch.randn(1024, 1024, device=device)
 y = x @ x.T

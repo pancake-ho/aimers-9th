@@ -86,10 +86,18 @@ class FeatureConfig:
 @dataclass(frozen=True)
 class ModelConfig:
     random_seed: int = 2026
-    num_threads: int = 6
+    # Seraph allocates 16 CPU cores. Submission inference separately caps the
+    # loaded XGBoost booster and PyTorch runtime at the DACON limit of 6.
+    num_threads: int = 16
 
     xgb_learning_rate: float = 0.03
     xgb_max_depth: int = 7
+    xgb_min_child_weight: float = 30.0
+    xgb_subsample: float = 0.90
+    xgb_colsample_bytree: float = 0.90
+    xgb_reg_lambda: float = 8.0
+    xgb_reg_alpha: float = 0.05
+    xgb_gamma: float = 0.0
     # QuantileDMatrix and the hist Booster must use exactly the same value.
     # Keep this explicit instead of relying on XGBoost's constructor default.
     xgb_max_bin: int = 256
@@ -99,6 +107,10 @@ class ModelConfig:
 
     cat_learning_rate: float = 0.03
     cat_depth: int = 8
+    cat_l2_leaf_reg: float = 8.0
+    cat_random_strength: float = 0.35
+    cat_bootstrap_type: str = "Bayesian"
+    cat_bagging_temperature: float = 0.5
     cat_iterations: int = 1200
     cat_early_stopping_rounds: int = 80
     cat_task_type: str = "CPU"
@@ -110,27 +122,38 @@ class NeuralConfig:
 
     device: str = "cuda"
     num_workers: int = 0
-    max_epochs: int = 16
-    early_stopping_patience: int = 4
-    min_epochs: int = 3
-    learning_rate: float = 1e-3
-    weight_decay: float = 1e-5
     max_grad_norm: float = 1.0
-    resnet_batch_size: int = 4096
+
+    # ResNet-like MLP: keep the proven 1e-3 AdamW scale, but avoid the very
+    # low-update 4096 batch and add regularization for temporal transfer.
+    resnet_learning_rate: float = 1e-3
+    resnet_weight_decay: float = 1e-3
+    resnet_max_epochs: int = 20
+    resnet_early_stopping_patience: int = 5
+    resnet_min_epochs: int = 4
+    resnet_batch_size: int = 2048
     resnet_eval_batch_size: int = 8192
     resnet_d_main: int = 256
     resnet_d_hidden: int = 512
-    resnet_n_blocks: int = 4
-    resnet_dropout_first: float = 0.20
+    resnet_n_blocks: int = 3
+    resnet_dropout_first: float = 0.25
     resnet_dropout_second: float = 0.10
 
+    # Resource-constrained FT-Transformer. The established default is
+    # d_token=192/lr=1e-4; 64 tokens preserve the optimizer/dropout regime
+    # while fitting three temporal/full runs into the RTX 3090 budget.
+    ft_learning_rate: float = 1e-4
+    ft_weight_decay: float = 1e-5
+    ft_max_epochs: int = 24
+    ft_early_stopping_patience: int = 6
+    ft_min_epochs: int = 5
     ft_batch_size: int = 512
     ft_eval_batch_size: int = 2048
-    ft_d_token: int = 32
-    ft_n_heads: int = 4
+    ft_d_token: int = 64
+    ft_n_heads: int = 8
     ft_n_layers: int = 3
-    ft_d_ffn: int = 64
-    ft_attention_dropout: float = 0.15
+    ft_d_ffn: int = 96
+    ft_attention_dropout: float = 0.20
     ft_ffn_dropout: float = 0.10
     ft_residual_dropout: float = 0.00
 
@@ -146,7 +169,7 @@ class ExperimentConfig:
     # target. Keep 2023 as a robustness guard, but optimize the blend mainly
     # for the one-step-ahead 2024 fold.
     temporal_fold_importance: Tuple[float, ...] = (0.20, 0.80)
-    ensemble_grid_step: float = 0.05
+    ensemble_grid_step: float = 0.025
     temporal_folds: Tuple[Tuple[Tuple[int, ...], int], ...] = (
         ((2019, 2020, 2021, 2022), 2023),
         ((2019, 2020, 2021, 2022, 2023), 2024),
