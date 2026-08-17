@@ -1,0 +1,9 @@
+{
+  "experiment_name": "E001c_v7_strict",
+  "recency_lambda": 0.0,
+  "use_trackman": true,
+  "models": [
+    "lgb"
+  ],
+  "valid_season": 2024
+}
