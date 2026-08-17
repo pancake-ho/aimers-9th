@@ -20,3 +20,6 @@ outputs/
 submission_build/
 dist/
 *.zip
+
+# Seraph
+logs/
