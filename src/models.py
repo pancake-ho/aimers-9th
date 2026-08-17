@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import gc
-from dataclasses import replace
 from typing import Sequence
 
 import numpy as np
@@ -34,12 +33,68 @@ def _xgb_params(config: ModelConfig) -> dict:
         "reg_alpha": 0.05,
         "gamma": 0.0,
         "tree_method": "hist",
-        "max_bin": 255,
+        "max_bin": int(config.xgb_max_bin),
         "device": "cpu",
         "seed": config.random_seed,
         "nthread": config.num_threads,
         "verbosity": 1,
     }
+
+
+def _quantile_dmatrix(
+    X: pd.DataFrame,
+    config: ModelConfig,
+    *,
+    label=None,
+    weight=None,
+    ref=None,
+):
+    """Construct every quantized matrix with the Booster's bin contract.
+
+    XGBoost stores the quantization cut structure in QuantileDMatrix. Its
+    max_bin must match the hist Booster parameter, including validation
+    matrices constructed with a training reference.
+    """
+    return xgb.QuantileDMatrix(
+        X,
+        label=label,
+        weight=weight,
+        feature_names=list(X.columns),
+        ref=ref,
+        max_bin=int(config.xgb_max_bin),
+        nthread=int(config.num_threads),
+    )
+
+
+def validate_xgboost_backend(config: ModelConfig) -> None:
+    """Fail fast on an incompatible XGBoost matrix/Booster contract.
+
+    This one-round check runs before the 1.47M-row feature build. It exercises
+    the same QuantileDMatrix + hist path used by temporal and final training.
+    """
+    if int(config.xgb_max_bin) < 2:
+        raise ValueError(f"xgb_max_bin must be >= 2; got {config.xgb_max_bin}")
+
+    X_probe = pd.DataFrame(
+        {
+            "probe_a": np.asarray([0, 1, 2, 3, 4, 5, 6, 7], dtype=np.float32),
+            "probe_b": np.asarray([1, 1, 0, 0, 1, 1, 0, 0], dtype=np.float32),
+        }
+    )
+    y_probe = np.asarray([0, 0, 0, 1, 0, 1, 1, 1], dtype=np.float32)
+    dprobe = _quantile_dmatrix(X_probe, config, label=y_probe)
+    params = _xgb_params(config)
+    params.update({"verbosity": 0, "min_child_weight": 1.0})
+    probe_model = xgb.train(params=params, dtrain=dprobe, num_boost_round=1)
+    prediction = np.asarray(probe_model.predict(dprobe), dtype=np.float64)
+    if prediction.shape != y_probe.shape or not np.isfinite(prediction).all():
+        raise RuntimeError("XGBoost backend preflight returned invalid predictions.")
+    print(
+        f"[BACKEND] XGBoost {xgb.__version__} preflight PASS "
+        f"(QuantileDMatrix/hist max_bin={config.xgb_max_bin})"
+    )
+    del probe_model, dprobe, X_probe, y_probe, prediction
+    gc.collect()
 
 
 def train_xgboost_fold(
@@ -50,16 +105,16 @@ def train_xgboost_fold(
     sample_weight: np.ndarray,
     config: ModelConfig,
 ):
-    dtrain = xgb.QuantileDMatrix(
+    dtrain = _quantile_dmatrix(
         X_train,
+        config,
         label=y_train,
         weight=sample_weight,
-        feature_names=list(X_train.columns),
     )
-    dvalid = xgb.QuantileDMatrix(
+    dvalid = _quantile_dmatrix(
         X_valid,
+        config,
         label=y_valid,
-        feature_names=list(X_valid.columns),
         ref=dtrain,
     )
     model = xgb.train(
@@ -90,11 +145,11 @@ def train_xgboost_full(
     config: ModelConfig,
     num_boost_round: int,
 ):
-    dtrain = xgb.QuantileDMatrix(
+    dtrain = _quantile_dmatrix(
         X_train,
+        config,
         label=y_train,
         weight=sample_weight,
-        feature_names=list(X_train.columns),
     )
     model = xgb.train(
         params=_xgb_params(config),

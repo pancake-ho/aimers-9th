@@ -12,6 +12,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from src.config import ExperimentConfig, ModelConfig
 from src.data import load_csv, validate_train_schema
+from src.models import validate_xgboost_backend
 from src.training import build_feature_table, run_temporal_validation
 
 
@@ -33,6 +34,7 @@ def main():
         use_trackman=not args.no_trackman,
         models=ModelConfig(cat_task_type=args.cat_task_type),
     )
+    validate_xgboost_backend(config.models)
     train = load_csv(config.paths.train_path)
     validate_train_schema(
         train,

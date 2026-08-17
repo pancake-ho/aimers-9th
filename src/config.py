@@ -82,6 +82,9 @@ class ModelConfig:
 
     xgb_learning_rate: float = 0.03
     xgb_max_depth: int = 7
+    # QuantileDMatrix and the hist Booster must use exactly the same value.
+    # Keep this explicit instead of relying on XGBoost's constructor default.
+    xgb_max_bin: int = 256
     xgb_num_boost_round: int = 1200
     xgb_early_stopping_rounds: int = 80
 
