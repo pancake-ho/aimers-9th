@@ -19,11 +19,43 @@ HAS_BACKENDS = all(
 
 if HAS_BACKENDS:
     from src.calibration import select_stable_weights
-    from src.models import MODEL_ORDER
+    from src.models import MODEL_ORDER, RESNET_MODEL_ORDER
 
 
 @unittest.skipUnless(HAS_BACKENDS, "GBDT training backends are not installed")
 class FourModelEnsembleTests(unittest.TestCase):
+    def test_simplex_search_supports_three_model_next_submission(self):
+        y = np.asarray([0, 0, 1, 1], dtype=np.float64)
+        folds = [
+            {
+                "y_true": y,
+                "predictions": {
+                    "xgb": np.asarray([0.3, 0.4, 0.6, 0.7]),
+                    "cat": np.asarray([0.4, 0.4, 0.6, 0.6]),
+                    "resnet": np.asarray([0.1, 0.1, 0.9, 0.9]),
+                },
+            },
+            {
+                "y_true": y,
+                "predictions": {
+                    "xgb": np.asarray([0.2, 0.3, 0.7, 0.8]),
+                    "cat": np.asarray([0.3, 0.4, 0.6, 0.7]),
+                    "resnet": np.asarray([0.1, 0.2, 0.8, 0.9]),
+                },
+            },
+        ]
+        weights, report = select_stable_weights(
+            folds,
+            fold_importance=(0.2, 0.8),
+            step=0.025,
+            model_order=RESNET_MODEL_ORDER,
+        )
+        self.assertEqual(tuple(RESNET_MODEL_ORDER), ("xgb", "cat", "resnet"))
+        self.assertEqual(weights.shape, (3,))
+        self.assertAlmostEqual(float(weights.sum()), 1.0)
+        self.assertGreater(float(weights[2]), 0.0)
+        self.assertEqual(report["model_order"], list(RESNET_MODEL_ORDER))
+
     def test_simplex_search_supports_four_models_and_recent_fold_weighting(self):
         y = np.asarray([0, 0, 1, 1], dtype=np.float64)
         earlier = {

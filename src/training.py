@@ -19,7 +19,6 @@ from src.features import LeakageSafeFeatureEngineer, StrictPastTrackmanFeatures
 from src.metrics import evaluate_probabilities
 from src.models import (
     GBDT_MODEL_ORDER,
-    MODEL_ORDER,
     train_catboost_fold,
     train_catboost_full,
     train_xgboost_fold,
@@ -31,6 +30,30 @@ from src.splits import make_temporal_folds, uniform_weights
 
 
 NEURAL_MODEL_ORDER = ("resnet", "ft_transformer")
+
+
+def _active_neural_models(config: ExperimentConfig) -> tuple[str, ...]:
+    if not config.neural.enabled:
+        return ()
+    requested = tuple(config.neural.models)
+    if not requested:
+        raise ValueError("Neural training is enabled but no neural models were selected.")
+    if len(set(requested)) != len(requested):
+        raise ValueError(f"Duplicate neural models are not allowed: {requested}")
+    unknown = [name for name in requested if name not in NEURAL_MODEL_ORDER]
+    if unknown:
+        raise ValueError(f"Unknown neural models: {unknown}")
+    return requested
+
+
+def _strategy_name(model_order: tuple[str, ...]) -> str:
+    if model_order == GBDT_MODEL_ORDER:
+        return "temporal_xgb_cat_probability_bias_cpu_fallback_v1"
+    if model_order == (*GBDT_MODEL_ORDER, "resnet"):
+        return "temporal_xgb_cat_resnet_probability_bias_v4"
+    if model_order == (*GBDT_MODEL_ORDER, *NEURAL_MODEL_ORDER):
+        return "temporal_gbdt_resnet_ftt_probability_bias_v3"
+    raise ValueError(f"Unsupported model order: {model_order}")
 
 
 def _print_metrics(label: str, metrics: Mapping[str, float]) -> None:
@@ -67,7 +90,8 @@ def run_temporal_validation(
 ) -> tuple[Dict[str, object], Dict[str, object]]:
     target = config.features.target_col
     fold_results = []
-    model_order = MODEL_ORDER if config.neural.enabled else GBDT_MODEL_ORDER
+    neural_model_order = _active_neural_models(config)
+    model_order = (*GBDT_MODEL_ORDER, *neural_model_order)
     print(f"[ENSEMBLE] active_models={list(model_order)}")
 
     for fold in make_temporal_folds(train, config.temporal_folds):
@@ -125,7 +149,7 @@ def run_temporal_validation(
         del cat_model
         gc.collect()
 
-        if config.neural.enabled:
+        if neural_model_order:
             from src.neural import (
                 NeuralPreprocessor,
                 prepare_neural_arrays,
@@ -141,7 +165,7 @@ def run_temporal_validation(
             train_arrays = prepare_neural_arrays(X_train, neural_state)
             valid_arrays = prepare_neural_arrays(X_valid, neural_state)
 
-            for offset, kind in enumerate(NEURAL_MODEL_ORDER, start=1):
+            for offset, kind in enumerate(neural_model_order, start=1):
                 start = time.perf_counter()
                 neural_model, prediction, best_epoch, _ = train_neural_fold(
                     kind=kind,
@@ -246,22 +270,16 @@ def run_temporal_validation(
             )
         ),
     }
-    if config.neural.enabled:
-        final_iterations.update(
-            {
-                "resnet": int(
-                    min(
-                        config.neural.resnet_max_epochs,
-                        max(2, round(recent_iterations["resnet"] * 1.05)),
-                    )
-                ),
-                "ft_transformer": int(
-                    min(
-                        config.neural.ft_max_epochs,
-                        max(2, round(recent_iterations["ft_transformer"] * 1.05)),
-                    )
-                ),
-            }
+    neural_epoch_caps = {
+        "resnet": int(config.neural.resnet_max_epochs),
+        "ft_transformer": int(config.neural.ft_max_epochs),
+    }
+    for kind in neural_model_order:
+        final_iterations[kind] = int(
+            min(
+                neural_epoch_caps[kind],
+                max(2, round(recent_iterations[kind] * 1.05)),
+            )
         )
 
     ensemble_state = {
@@ -271,11 +289,7 @@ def run_temporal_validation(
         "final_iterations": final_iterations,
     }
     report = {
-        "strategy": (
-            "temporal_gbdt_resnet_ftt_probability_bias_v3"
-            if config.neural.enabled
-            else "temporal_xgb_cat_probability_bias_cpu_fallback_v1"
-        ),
+        "strategy": _strategy_name(model_order),
         "folds": fold_summaries,
         "weight_selection": weight_report,
         "calibration": calibrator,
@@ -335,7 +349,8 @@ def train_and_save_final_models(
 
     neural_state = None
     neural_paths: Dict[str, Path] = {}
-    if config.neural.enabled:
+    neural_model_order = tuple(ensemble_state["model_order"])[len(GBDT_MODEL_ORDER) :]
+    if neural_model_order:
         from src.neural import (
             NeuralPreprocessor,
             prepare_neural_arrays,
@@ -350,7 +365,7 @@ def train_and_save_final_models(
         ).fit(X)
         neural_state = neural_preprocessor.export_state()
         train_arrays = prepare_neural_arrays(X, neural_state)
-        for offset, kind in enumerate(NEURAL_MODEL_ORDER, start=1):
+        for offset, kind in enumerate(neural_model_order, start=1):
             epochs = int(ensemble_state["final_iterations"][kind])
             print(f"[FINAL] Training {kind} for {epochs} epochs...")
             neural_model, model_spec = train_neural_full(
@@ -394,11 +409,7 @@ def train_and_save_final_models(
     joblib.dump(bundle, bundle_path, compress=3)
 
     manifest = {
-        "strategy": (
-            "temporal_gbdt_resnet_ftt_probability_bias_v3"
-            if config.neural.enabled
-            else "temporal_xgb_cat_probability_bias_cpu_fallback_v1"
-        ),
+        "strategy": _strategy_name(tuple(ensemble_state["model_order"])),
         "bundle_version": 3,
         "model_order": list(ensemble_state["model_order"]),
         "weights": list(ensemble_state["weights"]),
@@ -408,7 +419,7 @@ def train_and_save_final_models(
         "model_files": [
             xgb_path.name,
             cat_path.name,
-            *[neural_paths[name].name for name in NEURAL_MODEL_ORDER if name in neural_paths],
+            *[neural_paths[name].name for name in neural_model_order],
             bundle_path.name,
         ],
     }

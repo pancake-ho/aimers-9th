@@ -118,9 +118,13 @@ class ModelConfig:
 
 @dataclass(frozen=True)
 class NeuralConfig:
-    """GPU training settings for the two out-of-family tabular learners."""
+    """Training settings for optional out-of-family tabular learners."""
 
     enabled: bool = True
+    # Add one genuinely different learner before widening the ensemble.  The
+    # FT-Transformer remains implemented for later ablation, but the next
+    # leaderboard submission deliberately uses only the lower-cost ResNet.
+    models: Tuple[str, ...] = ("resnet",)
     device: str = "cuda"
     num_workers: int = 0
     max_grad_norm: float = 1.0

@@ -45,8 +45,16 @@ def resolve_device(requested: str) -> torch.device:
 
 
 def validate_neural_backend(config: NeuralConfig) -> None:
-    """Exercise both architectures and one backward pass before data loading."""
+    """Exercise every selected architecture before loading the full dataset."""
     device = resolve_device(config.device)
+    selected_models = tuple(config.models)
+    if not selected_models:
+        raise ValueError("Neural training is enabled but no neural models were selected.")
+    if len(set(selected_models)) != len(selected_models):
+        raise ValueError(f"Duplicate neural models are not allowed: {selected_models}")
+    unknown = [name for name in selected_models if name not in NEURAL_MODEL_ORDER]
+    if unknown:
+        raise ValueError(f"Unknown neural models: {unknown}")
     state = {
         "num_cols": ["n0", "n1"],
         "cat_cols": ["c0", "c1"],
@@ -64,7 +72,7 @@ def validate_neural_backend(config: NeuralConfig) -> None:
     )
     x_num = torch.randn(8, 2, device=device)
     x_cat = torch.randint(0, 4, (8, 2), device=device)
-    for kind in NEURAL_MODEL_ORDER:
+    for kind in selected_models:
         spec = make_model_spec(kind, state, probe_config)
         model = build_model(spec).to(device)
         model.train()
@@ -78,7 +86,7 @@ def validate_neural_backend(config: NeuralConfig) -> None:
     release_torch_memory()
     print(
         f"[BACKEND] PyTorch {torch.__version__} PASS "
-        f"(device={device}, models={','.join(NEURAL_MODEL_ORDER)})"
+        f"(device={device}, models={','.join(selected_models)})"
     )
 
 
@@ -410,6 +418,30 @@ def _eval_batch_size(kind: str, config: NeuralConfig) -> int:
     )
 
 
+def _optimizer_hparams(kind: str, config: NeuralConfig) -> tuple[float, float]:
+    if kind == "resnet":
+        return float(config.resnet_learning_rate), float(config.resnet_weight_decay)
+    if kind == "ft_transformer":
+        return float(config.ft_learning_rate), float(config.ft_weight_decay)
+    raise ValueError(f"Unknown neural model kind: {kind}")
+
+
+def _training_limits(kind: str, config: NeuralConfig) -> tuple[int, int, int]:
+    if kind == "resnet":
+        return (
+            int(config.resnet_max_epochs),
+            int(config.resnet_min_epochs),
+            int(config.resnet_early_stopping_patience),
+        )
+    if kind == "ft_transformer":
+        return (
+            int(config.ft_max_epochs),
+            int(config.ft_min_epochs),
+            int(config.ft_early_stopping_patience),
+        )
+    raise ValueError(f"Unknown neural model kind: {kind}")
+
+
 def _autocast(device: torch.device):
     return torch.autocast(
         device_type=device.type,
@@ -468,10 +500,12 @@ def train_neural_fold(
     device = resolve_device(config.device)
     spec = make_model_spec(kind, neural_state, config)
     model = build_model(spec).to(device)
+    learning_rate, weight_decay = _optimizer_hparams(kind, config)
+    max_epochs, min_epochs, early_stopping_patience = _training_limits(kind, config)
     optimizer = torch.optim.AdamW(
         model.parameters(),
-        lr=float(config.learning_rate),
-        weight_decay=float(config.weight_decay),
+        lr=learning_rate,
+        weight_decay=weight_decay,
     )
     scaler = _grad_scaler(device)
     dataset = _ArrayDataset(train_arrays[0], train_arrays[1], y_train, sample_weight)
@@ -488,7 +522,7 @@ def train_neural_fold(
     best_epoch = 0
     best_state = None
     stale_epochs = 0
-    for epoch in range(1, int(config.max_epochs) + 1):
+    for epoch in range(1, max_epochs + 1):
         model.train()
         loss_sum = 0.0
         weight_sum = 0.0
@@ -532,7 +566,7 @@ def train_neural_fold(
             stale_epochs = 0
         else:
             stale_epochs += 1
-        if epoch >= int(config.min_epochs) and stale_epochs >= int(config.early_stopping_patience):
+        if epoch >= min_epochs and stale_epochs >= early_stopping_patience:
             break
 
     if best_state is None:
@@ -563,10 +597,11 @@ def train_neural_full(
     device = resolve_device(config.device)
     spec = make_model_spec(kind, neural_state, config)
     model = build_model(spec).to(device)
+    learning_rate, weight_decay = _optimizer_hparams(kind, config)
     optimizer = torch.optim.AdamW(
         model.parameters(),
-        lr=float(config.learning_rate),
-        weight_decay=float(config.weight_decay),
+        lr=learning_rate,
+        weight_decay=weight_decay,
     )
     scaler = _grad_scaler(device)
     dataset = _ArrayDataset(train_arrays[0], train_arrays[1], y_train, sample_weight)

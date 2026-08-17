@@ -9,6 +9,7 @@ class ConfigContractTests(unittest.TestCase):
     def test_neural_models_have_separate_optimization_regimes(self) -> None:
         config = ExperimentConfig()
         self.assertEqual(config.models.num_threads, 16)
+        self.assertEqual(config.neural.models, ("resnet",))
         self.assertEqual(config.neural.resnet_learning_rate, 1e-3)
         self.assertEqual(config.neural.ft_learning_rate, 1e-4)
         self.assertGreater(
@@ -27,6 +28,7 @@ class ConfigContractTests(unittest.TestCase):
 
         self.assertTrue(enabled.enabled)
         self.assertFalse(disabled.enabled)
+        self.assertEqual(enabled.models, ("resnet",))
         self.assertEqual(enabled.resnet_max_epochs, disabled.resnet_max_epochs)
         self.assertEqual(enabled.ft_max_epochs, disabled.ft_max_epochs)
 

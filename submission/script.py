@@ -83,14 +83,17 @@ def main() -> None:
     model_order = list(bundle["ensemble"]["model_order"])
     supported_orders = [
         ["xgb", "cat"],
+        ["xgb", "cat", "resnet"],
         ["xgb", "cat", "resnet", "ft_transformer"],
     ]
     if model_order not in supported_orders:
         raise ValueError(f"Unsupported model order: {model_order}")
     neural = None
+    neural_device = None
     if "resnet" in model_order or "ft_transformer" in model_order:
         neural = _load_module("neural_runtime.py", "aimers_neural_runtime")
         neural.torch.set_num_threads(6)
+        neural_device = neural.resolve_device("auto")
 
     print("[2/8] Load and validate official inputs")
     test = _load_csv(DATA_DIR / "test.csv")
@@ -121,22 +124,37 @@ def main() -> None:
     gc.collect()
 
     if neural is not None:
-        print("[6/8] Predict tabular ResNet + FT-Transformer on CPU")
+        neural_names = model_order[2:]
+        print(
+            f"[6/8] Predict neural models: names={neural_names} "
+            f"device={neural_device}"
+        )
         neural_arrays = neural.prepare_neural_arrays(
             X, bundle["neural_preprocessor_state"]
         )
-        resnet_model = neural.load_checkpoint(MODEL_DIR / "resnet.pt", device="cpu")
-        predictions["resnet"] = neural.predict_model(
-            resnet_model, neural_arrays, device="cpu", batch_size=8192
-        )
-        del resnet_model
-        ft_model = neural.load_checkpoint(
-            MODEL_DIR / "ft_transformer.pt", device="cpu"
-        )
-        predictions["ft_transformer"] = neural.predict_model(
-            ft_model, neural_arrays, device="cpu", batch_size=2048
-        )
-        del ft_model, neural_arrays
+        if "resnet" in neural_names:
+            resnet_model = neural.load_checkpoint(
+                MODEL_DIR / "resnet.pt", device=neural_device
+            )
+            predictions["resnet"] = neural.predict_model(
+                resnet_model,
+                neural_arrays,
+                device=neural_device,
+                batch_size=8192,
+            )
+            del resnet_model
+        if "ft_transformer" in neural_names:
+            ft_model = neural.load_checkpoint(
+                MODEL_DIR / "ft_transformer.pt", device=neural_device
+            )
+            predictions["ft_transformer"] = neural.predict_model(
+                ft_model,
+                neural_arrays,
+                device=neural_device,
+                batch_size=2048,
+            )
+            del ft_model
+        del neural_arrays
     else:
         print("[6/8] Neural models absent: use validated GBDT-only fallback")
     del X

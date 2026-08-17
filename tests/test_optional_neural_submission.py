@@ -38,6 +38,13 @@ class OptionalNeuralSubmissionTests(unittest.TestCase):
         self.assertIn("model/resnet.pt", files)
         self.assertIn("model/ft_transformer.pt", files)
 
+    def test_three_model_archive_requires_only_resnet_checkpoint(self) -> None:
+        files = self._required_files_for(["xgb", "cat", "resnet"])
+
+        self.assertIn("model/neural_runtime.py", files)
+        self.assertIn("model/resnet.pt", files)
+        self.assertNotIn("model/ft_transformer.pt", files)
+
     def test_unknown_model_order_is_rejected(self) -> None:
         with self.assertRaisesRegex(ValueError, "Unsupported manifest model_order"):
             self._required_files_for(["xgb", "resnet"])

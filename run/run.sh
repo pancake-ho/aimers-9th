@@ -121,7 +121,8 @@ if torch_base_version != "2.5.1" or torch.version.cuda != "12.1":
 PY
 then
     TORCH_BUILD_OK=0
-    echo "[FALLBACK] PyTorch build is not usable; neural models will be disabled."
+    echo "[WARN] Preferred PyTorch CUDA build is unavailable."
+    echo "[FALLBACK] Try ResNet on CPU; if PyTorch itself is unusable, retry GBDT-only."
 fi
 
 echo "[RESOURCE] CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-unset}"
@@ -129,7 +130,7 @@ GPU_READY=1
 if ! nvidia-smi; then
     GPU_READY=0
     echo "[WARN] NVIDIA driver could not open the allocated GPU on $(hostname -s)."
-    echo "[FALLBACK] Continue with leakage-safe XGBoost+CatBoost CPU training."
+    echo "[FALLBACK] Continue with leakage-safe ResNet and GBDTs on CPU."
 fi
 
 if [[ "${GPU_READY}" -eq 1 ]]; then
@@ -198,7 +199,7 @@ if result != 0:
 PY
     then
         GPU_READY=0
-        echo "[FALLBACK] CUDA Driver API is unavailable; neural models will be disabled."
+        echo "[FALLBACK] CUDA Driver API is unavailable; ResNet will use CPU."
     fi
 fi
 
@@ -234,14 +235,14 @@ print(f"[GPU-PROBE] PASS device={torch.cuda.get_device_name(0)}")
 PY
     then
         GPU_READY=0
-        echo "[FALLBACK] PyTorch CUDA probe failed; neural models will be disabled."
+        echo "[FALLBACK] PyTorch CUDA probe failed; ResNet will use CPU."
     fi
 fi
 
 if [[ "${GPU_READY}" -eq 1 ]]; then
-    echo "[MODE] four_model_gpu"
+    echo "[MODE] three_model_resnet_cuda"
 else
-    echo "[MODE] gbdt_cpu_fallback"
+    echo "[MODE] three_model_resnet_cpu"
 fi
 
 echo "[PREFLIGHT] Validating DACON submission requirements before training"
@@ -322,18 +323,14 @@ TRAIN_ARGS=(
 )
 if [[ "${GPU_READY}" -eq 1 ]]; then
     TRAIN_ARGS+=("--nn-device" "cuda")
-    echo "[TRAIN] XGBoost=CPU, CatBoost=CPU, ResNet=CUDA, FT-Transformer=CUDA"
+    echo "[TRAIN] XGBoost=CPU, CatBoost=CPU, ResNet=CUDA"
 else
-    TRAIN_ARGS+=("--disable-neural")
-    echo "[TRAIN] XGBoost=CPU, CatBoost=CPU, neural=DISABLED"
+    TRAIN_ARGS+=("--nn-device" "cpu")
+    echo "[TRAIN] XGBoost=CPU, CatBoost=CPU, ResNet=CPU"
 fi
 echo "[TRAIN] command: python scripts/train_submit.py ${TRAIN_ARGS[*]}"
 if ! python scripts/train_submit.py "${TRAIN_ARGS[@]}"; then
-    if [[ "${GPU_READY}" -ne 1 ]]; then
-        echo "[ERROR] GBDT CPU fallback training failed."
-        exit 1
-    fi
-    echo "[FALLBACK] Four-model training failed after CUDA preflight."
+    echo "[FALLBACK] Three-model training failed."
     echo "[FALLBACK] Restarting clean XGBoost+CatBoost CPU training in the same job."
     TRAIN_ARGS=(
         "--clean"

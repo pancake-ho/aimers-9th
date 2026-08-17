@@ -64,15 +64,15 @@ def _required_files() -> dict[str, Path]:
     model_order = list(manifest.get("model_order", ()))
     if model_order == ["xgb", "cat"]:
         return files
-    if model_order != ["xgb", "cat", "resnet", "ft_transformer"]:
-        raise ValueError(f"Unsupported manifest model_order: {model_order}")
-    files.update(
-        {
-            "model/neural_runtime.py": NEURAL_RUNTIME_PATH,
-            "model/resnet.pt": MODEL_DIR / "resnet.pt",
-            "model/ft_transformer.pt": MODEL_DIR / "ft_transformer.pt",
-        }
+    supported_neural_orders = (
+        ["xgb", "cat", "resnet"],
+        ["xgb", "cat", "resnet", "ft_transformer"],
     )
+    if model_order not in supported_neural_orders:
+        raise ValueError(f"Unsupported manifest model_order: {model_order}")
+    files["model/neural_runtime.py"] = NEURAL_RUNTIME_PATH
+    for name in model_order[2:]:
+        files[f"model/{name}.pt"] = MODEL_DIR / f"{name}.pt"
     return files
 
 

@@ -30,12 +30,13 @@ class RunScriptContractTests(unittest.TestCase):
             script.index("[STAGE] Copying source code"),
         )
 
-    def test_gpu_failure_selects_cpu_fallback_instead_of_exiting(self) -> None:
+    def test_gpu_failure_keeps_resnet_on_cpu_then_allows_gbdt_retry(self) -> None:
         script = (PROJECT_ROOT / "run" / "run.sh").read_text(encoding="utf-8")
 
-        self.assertIn("[MODE] gbdt_cpu_fallback", script)
-        self.assertIn('TRAIN_ARGS+=("--disable-neural")', script)
-        self.assertIn("Four-model training failed after CUDA preflight", script)
+        self.assertIn("[MODE] three_model_resnet_cpu", script)
+        self.assertIn('TRAIN_ARGS+=("--nn-device" "cpu")', script)
+        self.assertIn("Three-model training failed", script)
+        self.assertIn('"--disable-neural"', script)
         self.assertIn("retry command: python scripts/train_submit.py", script)
         self.assertNotIn("exit 70", script)
         self.assertNotIn("exit 71", script)

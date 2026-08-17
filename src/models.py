@@ -12,6 +12,7 @@ from src.config import ModelConfig
 
 
 GBDT_MODEL_ORDER = ("xgb", "cat")
+RESNET_MODEL_ORDER = (*GBDT_MODEL_ORDER, "resnet")
 MODEL_ORDER = (*GBDT_MODEL_ORDER, "resnet", "ft_transformer")
 
 
