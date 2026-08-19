@@ -49,13 +49,6 @@ class FeatureConfig:
     pitcher_prior_strength: float = 100.0
     batter_prior_strength: float = 50.0
     cold_start_threshold: int = 50
-    # The residual learner starts from a conservative empirical-Bayes
-    # probability instead of relearning the global base rate.  A strong
-    # shrinkage level was deliberately chosen because the raw within-season
-    # pitcher rate is noisy and the league target mean drifts across years.
-    residual_prior_strength: float = 1000.0
-    residual_probability_clip: float = 0.02
-
     # Strictly-past cross-season target profiles.  These expose stable,
     # pitcher-specific context effects to every model while retaining the
     # official row-independence contract.  Older seasons are discounted and
@@ -93,7 +86,7 @@ class FeatureConfig:
 
     # Absolute season cannot extrapolate reliably to an unseen year.  The
     # binary ABS-regime feature remains available, while season/index features
-    # are excluded from both CatBoost and TabM.
+    # are excluded from every submitted model.
     excluded_cols: Tuple[str, ...] = (
         "row_id",
         "control_success",
@@ -107,7 +100,7 @@ class FeatureConfig:
 class ModelConfig:
     random_seed: int = 2026
     # Seraph allocates 16 CPU cores. Submission inference separately caps the
-    # PyTorch runtime at the DACON limit of 6.
+    # loaded XGBoost booster and PyTorch runtime at the DACON limit of 6.
     num_threads: int = 16
 
     xgb_learning_rate: float = 0.03
@@ -141,29 +134,13 @@ class NeuralConfig:
     """Training settings for optional out-of-family tabular learners."""
 
     enabled: bool = True
-    # The next submission uses a single parameter-efficient neural family.
-    # Legacy ResNet/FT-Transformer code remains available for controlled
-    # ablations, but is not part of the submitted ensemble.
-    models: Tuple[str, ...] = ("tabm",)
+    # Keep the two neural families that produced the team's strongest real
+    # leaderboard result. They have different inductive biases from boosted
+    # trees and remain small enough for the DACON L4 inference budget.
+    models: Tuple[str, ...] = ("resnet", "ft_transformer")
     device: str = "cuda"
     num_workers: int = 0
     max_grad_norm: float = 1.0
-
-    # TabM-style BatchEnsemble residual MLP.  The model returns k predictions
-    # that share the expensive weights but keep per-member adapters and heads.
-    # It learns a correction around hierarchical_success_logit.
-    tabm_learning_rate: float = 2e-3
-    tabm_weight_decay: float = 3e-4
-    tabm_max_epochs: int = 12
-    tabm_early_stopping_patience: int = 3
-    tabm_min_epochs: int = 3
-    tabm_batch_size: int = 1024
-    tabm_eval_batch_size: int = 4096
-    tabm_k: int = 32
-    tabm_d_block: int = 256
-    tabm_n_blocks: int = 3
-    tabm_dropout: float = 0.10
-    tabm_offset_col: str = "hierarchical_success_logit"
 
     # ResNet-like MLP: keep the proven 1e-3 AdamW scale, but avoid the very
     # low-update 4096 batch and add regularization for temporal transfer.
@@ -206,6 +183,10 @@ class ExperimentConfig:
     models: ModelConfig = field(default_factory=ModelConfig)
     neural: NeuralConfig = field(default_factory=NeuralConfig)
     use_trackman: bool = True
+    # The strictly-past target profile is leakage-safe, but the completed
+    # 2024 ablation worsened CatBoost by 0.00040154 Brier. Keep the code for
+    # controlled experiments and disable it for the next submission.
+    use_main_history: bool = False
     # 2024 is the first season from the same ABS regime as the hidden 2025
     # target. Keep 2023 as a robustness guard, but optimize the blend mainly
     # for the one-step-ahead 2024 fold.
@@ -213,6 +194,11 @@ class ExperimentConfig:
     # The full 2024 fold remains a larger-sample stability anchor.
     temporal_fold_importance: Tuple[float, ...] = (0.15, 0.35, 0.50)
     ensemble_grid_step: float = 0.025
+    # An ensemble may optimize the weighted average while regressing on the
+    # closest observable regimes. Require it to dominate the best stable
+    # single model on both full-2024 and late-2024 before packaging.
+    ensemble_protected_folds: Tuple[str, ...] = ("2024", "2024_late_abs")
+    ensemble_non_degradation_tolerance: float = 0.0
     temporal_folds: Tuple[Tuple[Tuple[int, ...], int], ...] = (
         ((2019, 2020, 2021, 2022), 2023),
         ((2019, 2020, 2021, 2022, 2023), 2024),

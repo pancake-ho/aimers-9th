@@ -18,12 +18,13 @@ except ImportError:  # pragma: no cover - exercised in lightweight test images
 from src.config import ModelConfig
 
 
-# The submitted ensemble intentionally keeps one tree family and one
-# out-of-family learner.  XGBoost helpers remain below for reproducible legacy
-# ablations, but XGBoost is not trained or packaged by the TabM strategy.
-GBDT_MODEL_ORDER = ("cat",)
+# Two complementary boosted-tree implementations anchor the ensemble. CatBoost
+# consumes the categorical columns natively; XGBoost adds a strong numerical
+# histogram learner whose errors were usefully different in the team's best
+# leaderboard pipeline.
+GBDT_MODEL_ORDER = ("xgb", "cat")
 RESNET_MODEL_ORDER = (*GBDT_MODEL_ORDER, "resnet")
-MODEL_ORDER = (*GBDT_MODEL_ORDER, "tabm")
+MODEL_ORDER = (*GBDT_MODEL_ORDER, "resnet", "ft_transformer")
 
 
 def _xgb_brier_metric(prediction, dmatrix):
@@ -68,7 +69,7 @@ def _quantile_dmatrix(
     matrices constructed with a training reference.
     """
     if xgb is None:
-        raise ImportError("xgboost is required for the legacy XGBoost ablation.")
+        raise ImportError("xgboost is required for the submitted GBDT ensemble.")
     return xgb.QuantileDMatrix(
         X,
         label=label,

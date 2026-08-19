@@ -9,6 +9,7 @@ from pathlib import Path
 import joblib
 import numpy as np
 import pandas as pd
+import xgboost as xgb
 from catboost import CatBoostClassifier
 
 
@@ -38,7 +39,7 @@ def _load_csv(path: Path) -> pd.DataFrame:
 
 
 def _validate_inputs(test: pd.DataFrame, sample: pd.DataFrame, bundle) -> None:
-    if bundle.get("bundle_version") != 4:
+    if bundle.get("bundle_version") != 5:
         raise ValueError(f"Unsupported bundle version: {bundle.get('bundle_version')}")
     if bundle.get("id_col") != ID_COL or bundle.get("target_col") != TARGET_COL:
         raise ValueError("Bundle column contract does not match the competition contract.")
@@ -59,14 +60,18 @@ def _validate_inputs(test: pd.DataFrame, sample: pd.DataFrame, bundle) -> None:
         raise ValueError(f"test.csv is missing trained columns: {sorted(missing)}")
 
 
-def _load_catboost_model():
+def _load_gbdt_models():
+    xgb_path = MODEL_DIR / "xgb_model.json"
     cat_path = MODEL_DIR / "cat_model.cbm"
-    if not cat_path.exists():
-        raise FileNotFoundError("CatBoost model file is required.")
+    if not xgb_path.exists() or not cat_path.exists():
+        raise FileNotFoundError("XGBoost and CatBoost model files are required.")
 
+    xgb_model = xgb.Booster()
+    xgb_model.load_model(str(xgb_path))
+    xgb_model.set_param({"nthread": 6, "device": "cpu"})
     cat_model = CatBoostClassifier()
     cat_model.load_model(str(cat_path))
-    return cat_model
+    return xgb_model, cat_model
 
 
 def main() -> None:
@@ -76,14 +81,15 @@ def main() -> None:
     runtime = _load_module("runtime.py", "aimers_runtime")
     model_order = list(bundle["ensemble"]["model_order"])
     supported_orders = [
-        ["cat"],
-        ["cat", "tabm"],
+        ["xgb", "cat"],
+        ["xgb", "cat", "resnet"],
+        ["xgb", "cat", "resnet", "ft_transformer"],
     ]
     if model_order not in supported_orders:
         raise ValueError(f"Unsupported model order: {model_order}")
     neural = None
     neural_device = None
-    if "tabm" in model_order:
+    if "resnet" in model_order or "ft_transformer" in model_order:
         neural = _load_module("neural_runtime.py", "aimers_neural_runtime")
         neural.torch.set_num_threads(6)
         neural_device = neural.resolve_device("auto")
@@ -104,17 +110,20 @@ def main() -> None:
     del features
     gc.collect()
 
-    print(f"[5/8] Predict CatBoost: features={X.shape[1]}")
-    cat_model = _load_catboost_model()
+    print(f"[5/8] Predict XGBoost + CatBoost: features={X.shape[1]}")
+    xgb_model, cat_model = _load_gbdt_models()
+    dtest = xgb.DMatrix(X, feature_names=list(X.columns))
+    xgb_prediction = np.asarray(xgb_model.predict(dtest), dtype=np.float64)
     cat_prediction = np.asarray(cat_model.predict_proba(X)[:, 1], dtype=np.float64)
     predictions = {
+        "xgb": xgb_prediction,
         "cat": cat_prediction,
     }
-    del cat_model
+    del dtest, xgb_model, cat_model
     gc.collect()
 
     if neural is not None:
-        neural_names = model_order[1:]
+        neural_names = model_order[2:]
         print(
             f"[6/8] Predict neural models: names={neural_names} "
             f"device={neural_device}"
@@ -122,17 +131,28 @@ def main() -> None:
         neural_arrays = neural.prepare_neural_arrays(
             X, bundle["neural_preprocessor_state"]
         )
-        if "tabm" in neural_names:
-            tabm_model = neural.load_checkpoint(
-                MODEL_DIR / "tabm.pt", device=neural_device
+        if "resnet" in neural_names:
+            resnet_model = neural.load_checkpoint(
+                MODEL_DIR / "resnet.pt", device=neural_device
             )
-            predictions["tabm"] = neural.predict_model(
-                tabm_model,
+            predictions["resnet"] = neural.predict_model(
+                resnet_model,
                 neural_arrays,
                 device=neural_device,
-                batch_size=4096,
+                batch_size=8192,
             )
-            del tabm_model
+            del resnet_model
+        if "ft_transformer" in neural_names:
+            ft_model = neural.load_checkpoint(
+                MODEL_DIR / "ft_transformer.pt", device=neural_device
+            )
+            predictions["ft_transformer"] = neural.predict_model(
+                ft_model,
+                neural_arrays,
+                device=neural_device,
+                batch_size=2048,
+            )
+            del ft_model
         del neural_arrays
     else:
         print("[6/8] Neural models absent: use validated GBDT-only fallback")

@@ -42,6 +42,8 @@ def select_stable_weights(
     fold_importance: Sequence[float],
     step: float = 0.05,
     model_order: Sequence[str] = MODEL_ORDER,
+    protected_fold_labels: Sequence[str] = (),
+    non_degradation_tolerance: float = 0.0,
 ) -> tuple[np.ndarray, Dict[str, object]]:
     """Minimize a regime-aware forward Brier objective.
 
@@ -57,8 +59,14 @@ def select_stable_weights(
     importance /= importance.sum()
     # For each fold, Brier(Pw, y) is a low-dimensional quadratic form.
     # Precomputing it makes a fine simplex grid independent of row count.
+    if non_degradation_tolerance < 0.0:
+        raise ValueError("non_degradation_tolerance must be non-negative.")
+
     quadratic_folds = []
+    fold_labels = []
     for fold in folds:
+        label = str(fold.get("validation_label", fold.get("valid_season", "")))
+        fold_labels.append(label)
         prediction_matrix = np.column_stack(
             [
                 np.clip(
@@ -81,17 +89,49 @@ def select_stable_weights(
             )
         )
 
+    protected_indices = []
+    for label in protected_fold_labels:
+        if label not in fold_labels:
+            raise ValueError(f"Protected fold is absent: {label}")
+        protected_indices.append(fold_labels.index(label))
+
+    # Pick one stable single-model reference using exactly the predeclared
+    # forward objective. A one-hot candidate for this model is always feasible,
+    # so the constraints can never force a silently arbitrary blend.
+    component_fold_scores = np.empty((len(model_order), len(folds)), dtype=np.float64)
+    for model_index in range(len(model_order)):
+        one_hot = np.zeros(len(model_order), dtype=np.float64)
+        one_hot[model_index] = 1.0
+        for fold_index, (gram, linear, constant) in enumerate(quadratic_folds):
+            component_fold_scores[model_index, fold_index] = float(
+                one_hot @ gram @ one_hot - 2.0 * linear @ one_hot + constant
+            )
+    component_objectives = component_fold_scores @ importance
+    reference_index = int(np.argmin(component_objectives))
+    reference_scores = component_fold_scores[reference_index]
+
     best_weights = None
     best_score = np.inf
     best_fold_scores = None
+    evaluated_candidates = 0
+    feasible_candidates = 0
 
     for weights in _candidate_weights(step, model_order=model_order):
+        evaluated_candidates += 1
         fold_scores = []
         for gram, linear, constant in quadratic_folds:
             fold_scores.append(
                 float(weights @ gram @ weights - 2.0 * linear @ weights + constant)
             )
-        score = float(np.dot(importance, np.asarray(fold_scores)))
+        fold_scores_array = np.asarray(fold_scores)
+        if any(
+            fold_scores_array[index]
+            > reference_scores[index] + float(non_degradation_tolerance) + 1e-15
+            for index in protected_indices
+        ):
+            continue
+        feasible_candidates += 1
+        score = float(np.dot(importance, fold_scores_array))
         if score < best_score:
             best_score = score
             best_weights = weights.copy()
@@ -106,6 +146,16 @@ def select_stable_weights(
         "fold_brier": [float(value) for value in best_fold_scores],
         "fold_importance": importance.tolist(),
         "grid_step": float(step),
+        "protected_folds": list(protected_fold_labels),
+        "non_degradation_tolerance": float(non_degradation_tolerance),
+        "reference_model": str(model_order[reference_index]),
+        "reference_fold_brier": reference_scores.tolist(),
+        "protected_fold_gain_vs_reference": {
+            fold_labels[index]: float(reference_scores[index] - best_fold_scores[index])
+            for index in protected_indices
+        },
+        "evaluated_candidates": int(evaluated_candidates),
+        "feasible_candidates": int(feasible_candidates),
     }
     return best_weights, report
 

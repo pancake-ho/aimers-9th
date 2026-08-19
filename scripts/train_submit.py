@@ -20,6 +20,7 @@ from src.training import (
     run_temporal_validation,
     train_and_save_final_models,
 )
+from src.models import validate_xgboost_backend
 
 
 def parse_args():
@@ -35,6 +36,12 @@ def parse_args():
         help="GPU is faster for local training; CPU is the reproducible default.",
     )
     parser.add_argument(
+        "--xgb-device",
+        choices=("cpu", "cuda"),
+        default="cuda",
+        help="Training backend for XGBoost; inference is always capped to CPU.",
+    )
+    parser.add_argument(
         "--nn-device",
         choices=("auto", "cpu", "cuda"),
         default="cuda",
@@ -43,7 +50,7 @@ def parse_args():
     parser.add_argument(
         "--disable-neural",
         action="store_true",
-        help="Train a leakage-safe CatBoost fallback without TabM.",
+        help="Train a leakage-safe XGBoost+CatBoost fallback without neural models.",
     )
     return parser.parse_args()
 
@@ -54,15 +61,17 @@ def main():
         use_trackman=not args.no_trackman,
         models=ModelConfig(
             cat_task_type=args.cat_task_type,
+            xgb_device=args.xgb_device,
         ),
         neural=NeuralConfig(enabled=not args.disable_neural, device=args.nn_device),
     )
+    validate_xgboost_backend(config.models)
     if config.neural.enabled:
         from src.neural import validate_neural_backend
 
         validate_neural_backend(config.neural)
     else:
-        print("[BACKEND] Neural models disabled; using CatBoost CPU fallback")
+        print("[BACKEND] Neural models disabled; using XGBoost+CatBoost CPU fallback")
     build_dir = config.paths.submission_build_dir
     model_dir = build_dir / "model"
     if args.clean and build_dir.exists():

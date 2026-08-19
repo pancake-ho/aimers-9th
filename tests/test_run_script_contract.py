@@ -13,12 +13,10 @@ class RunScriptContractTests(unittest.TestCase):
 
         self.assertNotIn("#SBATCH -w ", script)
         self.assertNotIn("#SBATCH --nodelist=", script)
-        self.assertNotIn("#SBATCH --exclude=", script)
         self.assertNotIn("requested_node=", script)
         self.assertNotIn("excluded_nodes=", script)
         self.assertNotIn("node_constraints=", script)
         self.assertNotIn("moana-y3", script)
-        self.assertNotIn("moana-y5", script)
 
     def test_cuda_driver_is_probed_before_data_staging(self) -> None:
         script = (PROJECT_ROOT / "run" / "run.sh").read_text(encoding="utf-8")
@@ -33,7 +31,12 @@ class RunScriptContractTests(unittest.TestCase):
     def test_gpu_failure_refuses_a_weaker_fallback(self) -> None:
         script = (PROJECT_ROOT / "run" / "run.sh").read_text(encoding="utf-8")
 
-        self.assertIn("[MODE] two_model_catboost_tabm_residual_cuda", script)
+        self.assertIn(
+            "[MODE] xgboost_catboost_resnet_fttransformer_constrained",
+            script,
+        )
+        self.assertIn("--exclude=moana-y5", script)
+        self.assertIn("preserve_diagnostics", script)
         self.assertIn('"--nn-device" "cuda"', script)
         self.assertIn("No valid CUDA backend", script)
         self.assertNotIn('"--disable-neural"', script)

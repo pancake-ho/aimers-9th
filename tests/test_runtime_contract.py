@@ -123,12 +123,10 @@ class RuntimeContractTests(unittest.TestCase):
         corrected = apply_logit_intercept(pred, 0.01)
         self.assertTrue(((corrected > 0.0) & (corrected < 1.0)).all())
 
-    def test_hierarchical_offset_is_finite_and_row_independent(self):
+    def test_rejected_hierarchical_offset_is_disabled_by_default(self):
         features = self.engineer.transform(self.raw)
-        self.assertIn("hierarchical_success_rate", features)
-        self.assertIn("hierarchical_success_logit", features)
-        self.assertTrue(np.isfinite(features["hierarchical_success_logit"]).all())
-        self.assertTrue(features["hierarchical_success_rate"].between(0.02, 0.98).all())
+        self.assertNotIn("hierarchical_success_rate", features)
+        self.assertNotIn("hierarchical_success_logit", features)
 
 
 if __name__ == "__main__":

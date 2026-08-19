@@ -22,21 +22,24 @@ class OptionalNeuralSubmissionTests(unittest.TestCase):
             with patch.object(build_submit, "MODEL_DIR", model_dir):
                 return build_submit._required_files()
 
-    def test_catboost_fallback_archive_does_not_require_neural_files(self) -> None:
-        files = self._required_files_for(["cat"])
+    def test_gbdt_fallback_archive_does_not_require_neural_files(self) -> None:
+        files = self._required_files_for(["xgb", "cat"])
 
         self.assertNotIn("model/neural_runtime.py", files)
-        self.assertNotIn("model/tabm.pt", files)
+        self.assertNotIn("model/resnet.pt", files)
 
-    def test_tabm_archive_requires_one_neural_checkpoint(self) -> None:
-        files = self._required_files_for(["cat", "tabm"])
+    def test_full_archive_requires_both_neural_checkpoints(self) -> None:
+        files = self._required_files_for(
+            ["xgb", "cat", "resnet", "ft_transformer"]
+        )
 
         self.assertIn("model/neural_runtime.py", files)
-        self.assertIn("model/tabm.pt", files)
+        self.assertIn("model/resnet.pt", files)
+        self.assertIn("model/ft_transformer.pt", files)
 
     def test_unknown_model_order_is_rejected(self) -> None:
         with self.assertRaisesRegex(ValueError, "Unsupported manifest model_order"):
-            self._required_files_for(["cat", "resnet"])
+            self._required_files_for(["cat", "ft_transformer"])
 
 
 if __name__ == "__main__":

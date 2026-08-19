@@ -4,6 +4,7 @@
 #SBATCH --cpus-per-gpu=16
 #SBATCH --mem-per-gpu=29G
 #SBATCH -p batch_eebme_ugrad
+#SBATCH --exclude=moana-y5
 #SBATCH -t 1-0
 #SBATCH -o /data/surt321/repos/aimers_9th/logs/slurm-%A.out
 
@@ -15,8 +16,19 @@ LOCAL_JOB_ROOT="/local_datasets/${USER}/aimers_9th/job-${JOB_ID}"
 LOCAL_PROJECT="${LOCAL_JOB_ROOT}/project"
 DATA_ARCHIVE="/data/${USER}/datasets/aimers_9th/open.zip"
 
+preserve_diagnostics() {
+    report_path="${LOCAL_PROJECT}/submission_build/model/validation_report.json"
+    if [[ -f "${report_path}" ]]; then
+        diagnostic_dir="${PROJECT_DIR}/artifacts/job-${JOB_ID}/submission_build/model"
+        mkdir -p "${diagnostic_dir}"
+        cp -- "${report_path}" "${diagnostic_dir}/validation_report.json"
+        echo "[DIAGNOSTIC] Preserved ${diagnostic_dir}/validation_report.json"
+    fi
+}
+
 cleanup() {
     exit_code=$?
+    preserve_diagnostics || true
     if [[ -n "${LOCAL_JOB_ROOT:-}" &&
           "${LOCAL_JOB_ROOT}" == "/local_datasets/${USER}/aimers_9th/job-"* &&
           -d "${LOCAL_JOB_ROOT}" ]]; then
@@ -97,10 +109,12 @@ import catboost
 import numpy
 import pandas
 import torch
+import xgboost
 
 print(f"[ENV] numpy={numpy.__version__}")
 print(f"[ENV] pandas={pandas.__version__}")
 print(f"[ENV] catboost={catboost.__version__}")
+print(f"[ENV] xgboost={xgboost.__version__}")
 print(f"[ENV] torch={torch.__version__}")
 print(f"[ENV] torch_cuda_build={torch.version.cuda}")
 
@@ -120,7 +134,7 @@ PY
 then
     TORCH_BUILD_OK=0
     echo "[WARN] Preferred PyTorch CUDA build is unavailable."
-    echo "[ERROR] TabM requires the pinned PyTorch build; refusing a weaker fallback."
+    echo "[ERROR] ResNet/FT-Transformer require the pinned PyTorch build."
 fi
 
 echo "[RESOURCE] CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-unset}"
@@ -128,7 +142,7 @@ GPU_READY=1
 if ! nvidia-smi; then
     GPU_READY=0
     echo "[WARN] NVIDIA driver could not open the allocated GPU on $(hostname -s)."
-    echo "[ERROR] TabM training requires the allocated GPU."
+    echo "[ERROR] Neural training requires the allocated GPU."
 fi
 
 if [[ "${GPU_READY}" -eq 1 ]]; then
@@ -197,7 +211,7 @@ if result != 0:
 PY
     then
         GPU_READY=0
-        echo "[ERROR] CUDA Driver API is unavailable for TabM."
+        echo "[ERROR] CUDA Driver API is unavailable for neural training."
     fi
 fi
 
@@ -233,7 +247,7 @@ print(f"[GPU-PROBE] PASS device={torch.cuda.get_device_name(0)}")
 PY
     then
         GPU_READY=0
-        echo "[ERROR] PyTorch CUDA probe failed for TabM."
+        echo "[ERROR] PyTorch CUDA probe failed for ResNet/FT-Transformer."
     fi
 fi
 
@@ -241,7 +255,7 @@ if [[ "${GPU_READY}" -ne 1 ]]; then
     echo "[ERROR] No valid CUDA backend; no lower-quality submit.zip will be built."
     exit 73
 fi
-echo "[MODE] two_model_catboost_tabm_residual_cuda"
+echo "[MODE] xgboost_catboost_resnet_fttransformer_constrained"
 
 echo "[PREFLIGHT] Validating DACON submission requirements before training"
 (
@@ -316,10 +330,11 @@ echo "[STAGE] Local working directory: $(pwd)"
 
 TRAIN_ARGS=(
     "--clean"
-    "--cat-task-type" "CPU"
+    "--cat-task-type" "GPU"
+    "--xgb-device" "cuda"
     "--nn-device" "cuda"
 )
-echo "[TRAIN] CatBoost=CPU, TabM-residual=CUDA"
+echo "[TRAIN] XGBoost=CUDA, CatBoost=GPU, ResNet/FT-Transformer=CUDA"
 echo "[TRAIN] command: python scripts/train_submit.py ${TRAIN_ARGS[*]}"
 python scripts/train_submit.py "${TRAIN_ARGS[@]}"
 
