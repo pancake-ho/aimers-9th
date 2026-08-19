@@ -1,0 +1,282 @@
+{
+  "strategy": "recent_context_tabdpt_turbo_xgb_v1",
+  "tabdpt_config": {
+    "context_size": 32768,
+    "max_features": 128,
+    "n_ensembles": 2,
+    "inference_batch_size": 65536,
+    "random_seed": 2026,
+    "use_flash_attention": true,
+    "compile_model": false,
+    "ensemble_grid_step": 0.025,
+    "fold_importance": [
+      0.15,
+      0.35,
+      0.5
+    ],
+    "protected_folds": [
+      "2024",
+      "2024_late_abs"
+    ],
+    "non_degradation_tolerance": 0.0,
+    "minimum_tabdpt_weight": 0.025,
+    "minimum_weighted_gain": 2e-05,
+    "maximum_2023_brier": 0.25018,
+    "l4_runtime_multiplier": 2.25,
+    "non_tabdpt_runtime_reserve_seconds": 75.0,
+    "maximum_estimated_runtime_seconds": 540.0
+  },
+  "folds": [
+    {
+      "name": "train_2019_2022_valid_2023",
+      "valid_season": 2023,
+      "validation_label": "2023",
+      "n_train": 976060,
+      "n_valid": 245525,
+      "context_rows": 32768,
+      "context_season": 2022,
+      "best_iterations": {
+        "xgb": 26
+      },
+      "metrics": {
+        "xgb": {
+          "brier": 0.25021654475885524,
+          "logloss": 0.6935943900009075,
+          "target_mean": 0.49995723449750534,
+          "pred_mean": 0.5256865071455314,
+          "pred_std": 0.024574496944968716,
+          "calibration_bias": 0.025729272648026047,
+          "auc": 0.5282814937960247,
+          "train_seconds": 2.688531095162034
+        },
+        "tabdpt": {
+          "brier": 0.2498135769050261,
+          "logloss": 0.6928467458212408,
+          "target_mean": 0.49995723449750534,
+          "pred_mean": 0.5182628981918537,
+          "pred_std": 0.04164968811864133,
+          "calibration_bias": 0.018305663694348308,
+          "auc": 0.5360771375014868,
+          "predict_seconds": 29.388046144042164
+        }
+      },
+      "raw_blend": {
+        "brier": 0.24999641738740666,
+        "logloss": 0.693153838278033,
+        "target_mean": 0.49995723449750534,
+        "pred_mean": 0.524201785354796,
+        "pred_std": 0.02644518516961943,
+        "calibration_bias": 0.02424455085729052,
+        "auc": 0.5311755781341888
+      },
+      "calibrated_blend": {
+        "brier": 0.24999641738740666,
+        "logloss": 0.693153838278033,
+        "target_mean": 0.49995723449750534,
+        "pred_mean": 0.524201785354796,
+        "pred_std": 0.02644518516961943,
+        "calibration_bias": 0.02424455085729052,
+        "auc": 0.5311755781341888
+      }
+    },
+    {
+      "name": "train_2019_2023_valid_2024",
+      "valid_season": 2024,
+      "validation_label": "2024",
+      "n_train": 1221585,
+      "n_valid": 253507,
+      "context_rows": 32768,
+      "context_season": 2023,
+      "best_iterations": {
+        "xgb": 172
+      },
+      "metrics": {
+        "xgb": {
+          "brier": 0.2480508504452437,
+          "logloss": 0.6892338378404691,
+          "target_mean": 0.4861049201797189,
+          "pred_mean": 0.49464805074477824,
+          "pred_std": 0.04299213185597936,
+          "calibration_bias": 0.008543130565059339,
+          "auc": 0.5476179965219221,
+          "train_seconds": 4.517553192097694
+        },
+        "tabdpt": {
+          "brier": 0.24866868126784297,
+          "logloss": 0.6904805183104953,
+          "target_mean": 0.4861049201797189,
+          "pred_mean": 0.4944043788712665,
+          "pred_std": 0.02179716952725483,
+          "calibration_bias": 0.008299458691547594,
+          "auc": 0.5432310017656838,
+          "predict_seconds": 28.00501962006092
+        }
+      },
+      "raw_blend": {
+        "brier": 0.2480459399639086,
+        "logloss": 0.6892248398254236,
+        "target_mean": 0.4861049201797189,
+        "pred_mean": 0.4945993163700759,
+        "pred_std": 0.03801598210489561,
+        "calibration_bias": 0.008494396190357016,
+        "auc": 0.5480338125576256
+      },
+      "calibrated_blend": {
+        "brier": 0.2480459399639086,
+        "logloss": 0.6892248398254236,
+        "target_mean": 0.4861049201797189,
+        "pred_mean": 0.4945993163700759,
+        "pred_std": 0.03801598210489561,
+        "calibration_bias": 0.008494396190357016,
+        "auc": 0.5480338125576256
+      }
+    },
+    {
+      "name": "train_2019_2024m06_valid_2024m7_8_9",
+      "valid_season": 2024,
+      "validation_label": "2024_late_abs",
+      "n_train": 1365126,
+      "n_valid": 108295,
+      "context_rows": 32768,
+      "context_season": 2024,
+      "best_iterations": {
+        "xgb": 238
+      },
+      "metrics": {
+        "xgb": {
+          "brier": 0.24798228143074158,
+          "logloss": 0.6890962213485342,
+          "target_mean": 0.48022531049448264,
+          "pred_mean": 0.4868779034337496,
+          "pred_std": 0.04685004728117415,
+          "calibration_bias": 0.006652592939266929,
+          "auc": 0.5457171932586405,
+          "train_seconds": 5.340607263147831
+        },
+        "tabdpt": {
+          "brier": 0.24872515037972867,
+          "logloss": 0.6905924962148071,
+          "target_mean": 0.48022531049448264,
+          "pred_mean": 0.49462874905159004,
+          "pred_std": 0.0254694925127623,
+          "calibration_bias": 0.014403438557107405,
+          "auc": 0.5378096852451577,
+          "predict_seconds": 13.065572218969464
+        }
+      },
+      "raw_blend": {
+        "brier": 0.2479788976713863,
+        "logloss": 0.689088310039475,
+        "target_mean": 0.48022531049448264,
+        "pred_mean": 0.4884280725573178,
+        "pred_std": 0.04175326456774431,
+        "calibration_bias": 0.00820276206283505,
+        "auc": 0.5456274876926601
+      },
+      "calibrated_blend": {
+        "brier": 0.2479788976713863,
+        "logloss": 0.689088310039475,
+        "target_mean": 0.48022531049448264,
+        "pred_mean": 0.4884280725573178,
+        "pred_std": 0.04175326456774431,
+        "calibration_bias": 0.00820276206283505,
+        "auc": 0.5456274876926601
+      }
+    }
+  ],
+  "weight_selection": {
+    "model_order": [
+      "xgb",
+      "tabdpt"
+    ],
+    "weights": [
+      0.8,
+      0.2
+    ],
+    "forward_weighted_brier": 0.24830499043117177,
+    "fold_brier": [
+      0.24999641738740586,
+      0.24804593996390845,
+      0.24797889767138587
+    ],
+    "fold_importance": [
+      0.15,
+      0.35,
+      0.5
+    ],
+    "grid_step": 0.025,
+    "protected_folds": [
+      "2024",
+      "2024_late_abs"
+    ],
+    "non_degradation_tolerance": 0.0,
+    "reference_model": "xgb",
+    "reference_fold_brier": [
+      0.25021654475885413,
+      0.2480508504452433,
+      0.24798228143074105
+    ],
+    "protected_fold_gain_vs_reference": {
+      "2024": 4.910481334857719e-06,
+      "2024_late_abs": 3.383759355185534e-06
+    },
+    "evaluated_candidates": 41,
+    "feasible_candidates": 9
+  },
+  "calibration": {
+    "method": "logit_intercept",
+    "accepted": false,
+    "intercept": 0.0,
+    "earlier_intercept": -0.09703999999999997,
+    "recent_intercept": -0.03424499999999998,
+    "recent_raw_brier": 0.2480459399639086,
+    "recent_transferred_brier": 0.24821648218235667,
+    "transfer_gain": -0.00017054221844806094
+  },
+  "submission_gate": {
+    "passed": true,
+    "checks": {
+      "tabdpt_has_material_weight": true,
+      "weighted_gain": true,
+      "2023_guard": true,
+      "estimated_l4_runtime": true,
+      "calibration_late_transfer": true,
+      "non_degradation_2024": true,
+      "non_degradation_2024_late_abs": true
+    },
+    "observed": {
+      "weights": [
+        0.8,
+        0.2
+      ],
+      "weighted_xgb_brier": 0.24834142008503438,
+      "weighted_blend_brier": 0.24830499043117216,
+      "weighted_gain": 3.642965386221886e-05,
+      "full_2024_rtx3090_tabdpt_seconds": 28.00501962006092,
+      "estimated_l4_total_seconds": 138.01129414513707,
+      "fold_xgb_brier": [
+        0.25021654475885524,
+        0.2480508504452437,
+        0.24798228143074158
+      ],
+      "fold_blend_brier": [
+        0.24999641738740666,
+        0.2480459399639086,
+        0.2479788976713863
+      ],
+      "fold_packaged_brier": [
+        0.24999641738740666,
+        0.2480459399639086,
+        0.2479788976713863
+      ]
+    },
+    "thresholds": {
+      "minimum_tabdpt_weight": 0.025,
+      "minimum_weighted_gain": 2e-05,
+      "maximum_2023_brier": 0.25018,
+      "l4_runtime_multiplier": 2.25,
+      "non_tabdpt_runtime_reserve_seconds": 75.0,
+      "maximum_estimated_runtime_seconds": 540.0
+    }
+  }
+}

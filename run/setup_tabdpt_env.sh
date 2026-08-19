@@ -5,6 +5,7 @@ set -Eeuo pipefail
 PROJECT_DIR="/data/${USER}/repos/aimers_9th"
 MODEL_DIR="/data/${USER}/models/tabdpt"
 MODEL_PATH="${MODEL_DIR}/tabdpt1_2.safetensors"
+CONDA_ENV="aimers"
 EXPECTED_BYTES="254098072"
 EXPECTED_SHA256="06680220fd66c4524051706b98c1c659a674d19d3a766cd0bb276505e99faccd"
 
@@ -14,15 +15,29 @@ if [[ ! -f "${CONDA_SH}" ]]; then
     exit 1
 fi
 source "${CONDA_SH}"
-conda activate aimers
+conda activate "${CONDA_ENV}"
 
-echo "[SETUP] Installing TabDPT-Turbo interface without replacing CUDA PyTorch"
+echo "[SETUP] Installing a mutually compatible PyTorch stack in ${CONDA_ENV}"
+python -m pip install \
+    --force-reinstall \
+    --no-cache-dir \
+    "torch==2.6.0" \
+    "torchvision==0.21.0" \
+    "torchaudio==2.6.0" \
+    --index-url https://download.pytorch.org/whl/cu118
+
+echo "[SETUP] Installing the complete TabDPT 1.2 runtime contract"
 python -m pip install \
     "faiss-cpu>=1.11.0,<1.13.0" \
     "huggingface-hub>=0.33.2,<2.0" \
+    "numpy>=1.25.0,<3.0" \
     "omegaconf>=2.1.1,<3.0" \
-    "safetensors>=0.5.3,<1.0"
+    "safetensors>=0.5.3,<1.0" \
+    "scikit-learn>=1.4.0,<2.0" \
+    "scipy>=1.9.0,<2.0" \
+    "tqdm>=4.38.0,<5.0"
 python -m pip install --no-deps "tabdpt==1.2.0"
+python -m pip check
 
 mkdir -p "${MODEL_DIR}"
 if [[ -f "${MODEL_PATH}" ]] && \
@@ -65,10 +80,19 @@ import torch
 
 from tabdpt import TabDPTClassifier
 
-assert version("tabdpt") == "1.2.0"
-print(f"[SETUP] tabdpt={version('tabdpt')} torch={torch.__version__}")
+print(f"[SETUP] tabdpt={version('tabdpt')}")
+print(f"[SETUP] torch={torch.__version__} cuda_build={torch.version.cuda}")
+if version("tabdpt") != "1.2.0":
+    raise RuntimeError(f"Expected tabdpt==1.2.0, got {version('tabdpt')}")
+if not torch.__version__.startswith("2.6.0"):
+    raise RuntimeError(f"Expected torch 2.6.0, got {torch.__version__}")
+if torch.version.cuda != "11.8":
+    raise RuntimeError(
+        f"Expected the CUDA 11.8 PyTorch build, got {torch.version.cuda}"
+    )
 print("[SETUP] torch SDPA API PASS")
 PY
 
 echo "[DONE] ${MODEL_PATH}"
+echo "[DONE] conda_env=${CONDA_ENV}"
 echo "[NEXT] cd ${PROJECT_DIR} && sbatch run/run_tabdpt_submit.sh"

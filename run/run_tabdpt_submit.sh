@@ -12,6 +12,7 @@ set -Eeuo pipefail
 
 PROJECT_DIR="/data/${USER}/repos/aimers_9th"
 JOB_ID="${SLURM_JOB_ID:?SLURM_JOB_ID is not set}"
+CONDA_ENV="aimers"
 LOCAL_JOB_ROOT="/local_datasets/${USER}/aimers_9th/tabdpt-${JOB_ID}"
 LOCAL_PROJECT="${LOCAL_JOB_ROOT}/project"
 DATA_ARCHIVE="/data/${USER}/datasets/aimers_9th/open.zip"
@@ -78,29 +79,62 @@ export NUMEXPR_NUM_THREADS="${SLURM_CPUS_PER_GPU:-16}"
 export TOKENIZERS_PARALLELISM=false
 
 CONDA_SH="/data/${USER}/anaconda3/etc/profile.d/conda.sh"
+if [[ ! -f "${CONDA_SH}" ]]; then
+    echo "[ERROR] Missing conda initialization: ${CONDA_SH}"
+    exit 4
+fi
 source "${CONDA_SH}"
-conda activate aimers
+conda activate "${CONDA_ENV}"
 python --version
 python - <<'PY'
 from importlib.metadata import version
-from torch.nn.attention import SDPBackend, sdpa_kernel
+
+print(f"[ENV] numpy_package={version('numpy')}", flush=True)
+print(f"[ENV] xgboost_package={version('xgboost')}", flush=True)
+print(f"[ENV] torch_package={version('torch')}", flush=True)
+print(f"[ENV] tabdpt_package={version('tabdpt')}", flush=True)
+
 import numpy
 import torch
+import torch.nn.functional as F
 import xgboost
+from torch.nn.attention import SDPBackend, sdpa_kernel
 
 from tabdpt import TabDPTClassifier
 
-assert version("tabdpt") == "1.2.0"
-assert torch.cuda.is_available()
-x = torch.ones((128, 128), device="cuda")
-assert torch.isfinite(x @ x).all()
-print(f"[ENV] numpy={numpy.__version__}")
-print(f"[ENV] xgboost={xgboost.__version__}")
-print(f"[ENV] torch={torch.__version__} cuda={torch.version.cuda}")
-print(f"[ENV] tabdpt={version('tabdpt')}")
-print(f"[GPU] {torch.cuda.get_device_name(0)}")
+print(f"[ENV] torch={torch.__version__} cuda_build={torch.version.cuda}", flush=True)
+if version("tabdpt") != "1.2.0":
+    raise RuntimeError(f"Expected tabdpt==1.2.0, got {version('tabdpt')}")
+if not torch.__version__.startswith("2.6.0"):
+    raise RuntimeError(f"Expected torch 2.6.0, got {torch.__version__}")
+if torch.version.cuda != "11.8":
+    raise RuntimeError(
+        f"Expected the CUDA 11.8 PyTorch build, got {torch.version.cuda}"
+    )
+if not torch.cuda.is_available():
+    raise RuntimeError(
+        "PyTorch CUDA initialization failed inside the allocated Slurm job. "
+        "Re-run run/setup_tabdpt_env.sh and confirm this job requests --gres=gpu:1."
+    )
+
+device = torch.device("cuda:0")
+x = torch.ones((128, 128), device=device)
+product = x @ x
+if not torch.isfinite(product).all():
+    raise RuntimeError("CUDA matrix multiplication produced non-finite values.")
+
+query = torch.randn((1, 4, 128, 64), device=device, dtype=torch.float16)
+with sdpa_kernel(SDPBackend.FLASH_ATTENTION):
+    attention = F.scaled_dot_product_attention(query, query, query)
+if not torch.isfinite(attention).all():
+    raise RuntimeError("Flash SDPA produced non-finite values.")
+
+print(f"[GPU] device={torch.cuda.get_device_name(0)}", flush=True)
+print("[GPU] CUDA matmul PASS", flush=True)
+print("[GPU] Flash SDPA PASS", flush=True)
+del attention, product, query, x
+torch.cuda.empty_cache()
 PY
-nvidia-smi
 free -h
 df -h /local_datasets
 
