@@ -3,6 +3,7 @@
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-gpu=16
 #SBATCH --mem-per-gpu=29G
+#SBATCH --exclude=moana-y5
 #SBATCH -p batch_eebme_ugrad
 #SBATCH -t 1-0
 #SBATCH -o /data/surt321/repos/aimers_9th/logs/residual-%A.out
