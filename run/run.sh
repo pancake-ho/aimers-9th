@@ -255,7 +255,7 @@ if [[ "${GPU_READY}" -ne 1 ]]; then
     echo "[ERROR] No valid CUDA backend; no lower-quality submit.zip will be built."
     exit 73
 fi
-echo "[MODE] xgboost_catboost_resnet_fttransformer_constrained"
+echo "[MODE] xgboost_catboost_resnet_fttransformer_constrained + trackman_entity_v8"
 
 echo "[PREFLIGHT] Validating DACON submission requirements before training"
 (
@@ -277,6 +277,7 @@ echo "[PREFLIGHT] Exercising feature and neural source contracts"
     cd "${PROJECT_DIR}"
     python -m unittest \
         tests.test_feature_config_alignment \
+        tests.test_trackman_entity_contract \
         tests.test_neural_config_alignment \
         tests.test_neural_contract \
         -q

@@ -56,7 +56,7 @@ def _strategy_name(model_order: tuple[str, ...]) -> str:
     if model_order == (*GBDT_MODEL_ORDER, "resnet"):
         return "temporal_xgb_cat_resnet_regime_v6"
     if model_order == (*GBDT_MODEL_ORDER, "resnet", "ft_transformer"):
-        return "temporal_gbdt_resnet_ftt_constrained_v7"
+        return "trackman_entity_gbdt_resnet_ftt_constrained_v8"
     raise ValueError(f"Unsupported model order: {model_order}")
 
 
@@ -78,7 +78,10 @@ def build_feature_table(
     if config.use_trackman:
         if not config.paths.trackman_path.exists():
             raise FileNotFoundError(config.paths.trackman_path)
-        trackman = StrictPastTrackmanFeatures().fit_from_csv(config.paths.trackman_path)
+        trackman = StrictPastTrackmanFeatures(config.features).fit_from_csv(
+            config.paths.trackman_path,
+            main_train=train,
+        )
 
     main_history = None
     if config.use_main_history:
@@ -103,6 +106,9 @@ def run_temporal_validation(
     config: ExperimentConfig,
 ) -> tuple[Dict[str, object], Dict[str, object]]:
     target = config.features.target_col
+    entity_gate_required = bool(
+        config.use_trackman and config.features.trackman_entity_enabled
+    )
     fold_results = []
     neural_model_order = _active_neural_models(config)
     model_order = (*GBDT_MODEL_ORDER, *neural_model_order)
@@ -137,6 +143,7 @@ def run_temporal_validation(
         predictions: Dict[str, np.ndarray] = {}
         best_iterations: Dict[str, int] = {}
         per_model_metrics: Dict[str, Dict[str, float]] = {}
+        entity_ablation: Dict[str, object] | None = None
 
         start = time.perf_counter()
         xgb_model, predictions["xgb"], best_iterations["xgb"] = train_xgboost_fold(
@@ -151,6 +158,51 @@ def run_temporal_validation(
         per_model_metrics["xgb"] = evaluate_probabilities(y_valid, predictions["xgb"])
         per_model_metrics["xgb"]["train_seconds"] = float(elapsed)
         _print_metrics(f"{fold.validation_label}/xgb", per_model_metrics["xgb"])
+
+        entity_columns = [
+            column for column in X_train.columns if column.startswith("tm_entity_")
+        ]
+        if entity_gate_required:
+            if not entity_columns:
+                raise RuntimeError(
+                    "Trackman entity resolution is enabled but no tm_entity_* "
+                    "features reached the preprocessor."
+                )
+            baseline_columns = [
+                column for column in X_train.columns if column not in entity_columns
+            ]
+            start_ablation = time.perf_counter()
+            baseline_model, baseline_prediction, baseline_iterations = (
+                train_xgboost_fold(
+                    X_train[baseline_columns],
+                    y_train,
+                    X_valid[baseline_columns],
+                    y_valid,
+                    sample_weight,
+                    config.models,
+                )
+            )
+            baseline_metrics = evaluate_probabilities(y_valid, baseline_prediction)
+            baseline_metrics["train_seconds"] = float(
+                time.perf_counter() - start_ablation
+            )
+            entity_gain = float(
+                baseline_metrics["brier"] - per_model_metrics["xgb"]["brier"]
+            )
+            entity_ablation = {
+                "baseline_without_entity": baseline_metrics,
+                "with_entity": dict(per_model_metrics["xgb"]),
+                "brier_gain": entity_gain,
+                "n_entity_features": int(len(entity_columns)),
+                "baseline_best_iterations": int(baseline_iterations),
+            }
+            print(
+                f"[{fold.validation_label}/entity-ablation] "
+                f"baseline={baseline_metrics['brier']:.8f} "
+                f"with_entity={per_model_metrics['xgb']['brier']:.8f} "
+                f"gain={entity_gain:+.8f} features={len(entity_columns)}"
+            )
+            del baseline_model, baseline_prediction
         del xgb_model
         gc.collect()
 
@@ -223,6 +275,7 @@ def run_temporal_validation(
                 "predictions": predictions,
                 "best_iterations": best_iterations,
                 "metrics": per_model_metrics,
+                "entity_ablation": entity_ablation,
                 "n_train": int(len(fold.train_idx)),
                 "n_valid": int(len(fold.valid_idx)),
             }
@@ -264,6 +317,7 @@ def run_temporal_validation(
                 "n_valid": fold["n_valid"],
                 "best_iterations": fold["best_iterations"],
                 "models": fold["metrics"],
+                "entity_ablation": fold["entity_ablation"],
                 "ensemble": ensemble_metrics,
             }
         )
@@ -342,11 +396,29 @@ def run_temporal_validation(
         float(metrics["brier"]) for metrics in late["models"].values()
     )
     late_blend_gain = late_best_component - late_ensemble
+    entity_2024_gain = (
+        float(by_label["2024"]["entity_ablation"]["brier_gain"])
+        if entity_gate_required
+        else None
+    )
+    entity_late_gain = (
+        float(late["entity_ablation"]["brier_gain"])
+        if entity_gate_required
+        else None
+    )
     checks = {
         "2023_guard": guard_2023 <= config.submission_gate_2023_max_brier,
         "2024_target": anchor_2024 <= config.submission_gate_2024_max_brier,
         "late_abs_blend": (
             late_blend_gain >= config.submission_gate_late_min_blend_gain
+        ),
+        "entity_2024_paired_ablation": (
+            not entity_gate_required
+            or entity_2024_gain >= config.submission_gate_entity_2024_min_gain
+        ),
+        "entity_late_paired_ablation": (
+            not entity_gate_required
+            or entity_late_gain >= config.submission_gate_entity_late_min_gain
         ),
     }
     report["submission_gate"] = {
@@ -361,11 +433,15 @@ def run_temporal_validation(
             "2024_late_brier": late_ensemble,
             "2024_late_best_component_brier": late_best_component,
             "2024_late_blend_gain": late_blend_gain,
+            "entity_2024_xgb_brier_gain": entity_2024_gain,
+            "entity_late_xgb_brier_gain": entity_late_gain,
         },
         "thresholds": {
             "2023_max_brier": config.submission_gate_2023_max_brier,
             "2024_max_brier": config.submission_gate_2024_max_brier,
             "2024_late_min_blend_gain": config.submission_gate_late_min_blend_gain,
+            "entity_2024_min_gain": config.submission_gate_entity_2024_min_gain,
+            "entity_late_min_gain": config.submission_gate_entity_late_min_gain,
         },
     }
     return ensemble_state, report
@@ -462,7 +538,7 @@ def train_and_save_final_models(
 
     raw_feature_cols = [col for col in train.columns if col != target]
     bundle = {
-        "bundle_version": 5,
+        "bundle_version": 6,
         "id_col": config.features.id_col,
         "target_col": target,
         "expected_raw_columns": raw_feature_cols,
@@ -482,7 +558,7 @@ def train_and_save_final_models(
 
     manifest = {
         "strategy": _strategy_name(tuple(ensemble_state["model_order"])),
-        "bundle_version": 5,
+        "bundle_version": 6,
         "model_order": list(ensemble_state["model_order"]),
         "weights": list(ensemble_state["weights"]),
         "calibration": dict(ensemble_state["calibration"]),

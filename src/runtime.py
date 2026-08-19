@@ -8,7 +8,7 @@ import pandas as pd
 
 ID_COL = "row_id"
 TARGET_COL = "control_success"
-FEATURE_VERSION = 3
+FEATURE_VERSION = 4
 
 PITCHER_RATE_COLS = (
     "asof_pitcher_success_rate",
@@ -130,6 +130,43 @@ def add_trackman_features(out: pd.DataFrame, trackman_state) -> pd.DataFrame:
         strikes = _numeric(out["strikes_before"], -1).astype(int).to_numpy()
         keys = list(zip(season, pitcher_hand, batter_hand, balls, strikes))
         profile_frames.append(_lookup_trackman_profile(out.index, count_profile, keys))
+
+    # High-confidence pitcher identity links are precomputed from training-side
+    # official files. Runtime performs only immutable row lookups; it neither
+    # reads Trackman nor pools information across evaluation rows.
+    entity = trackman_state.get("entity")
+    if entity:
+        entity_profiles = entity.get("profiles", {})
+        mapping_profile = entity_profiles.get("mapping")
+        if mapping_profile:
+            pitcher_id = _numeric(out["pitcher_id"], -1).astype(np.int64).to_numpy()
+            mapping_keys = list(zip(season, pitcher_id))
+            profile_frames.append(
+                _lookup_trackman_profile(out.index, mapping_profile, mapping_keys)
+            )
+            mapping_lookup = mapping_profile.get("lookup", {})
+            trackman_id = np.full(len(out), -1, dtype=np.int64)
+            for row_pos, key in enumerate(mapping_keys):
+                values = mapping_lookup.get(tuple(key))
+                if values is not None:
+                    trackman_id[row_pos] = int(values.get("trackman_id", -1))
+
+            entity_key_specs = {
+                "pitcher": list(zip(season, trackman_id)),
+                "recent": list(zip(season, trackman_id)),
+                "arsenal": list(zip(season, trackman_id)),
+            }
+            balls = _numeric(out["balls_before"], -1).astype(int).to_numpy()
+            strikes = _numeric(out["strikes_before"], -1).astype(int).to_numpy()
+            entity_key_specs["count"] = list(
+                zip(season, trackman_id, balls, strikes)
+            )
+            for name, keys in entity_key_specs.items():
+                profile = entity_profiles.get(name)
+                if profile:
+                    profile_frames.append(
+                        _lookup_trackman_profile(out.index, profile, keys)
+                    )
 
     if not profile_frames:
         return out

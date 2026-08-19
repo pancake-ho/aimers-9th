@@ -59,6 +59,26 @@ class FeatureConfig:
     history_matchup_strength: float = 90.0
     history_count_matchup_strength: float = 100.0
 
+    # Official-file-only entity resolution between main pitcher_id and the
+    # disjoint pitcher_trackman_id namespace.  Ambiguous pairs are rejected;
+    # rejected/unseen pitchers retain the existing hand/count Trackman
+    # fallback.  Thresholds are label-free and fixed before temporal scoring.
+    trackman_entity_enabled: bool = True
+    trackman_entity_min_pitches: int = 300
+    trackman_entity_max_distance: float = 10.0
+    trackman_entity_min_margin_ratio: float = 1.35
+    trackman_entity_strong_margin_ratio: float = 2.0
+    trackman_entity_min_count_ratio: float = 0.55
+    trackman_entity_max_count_ratio: float = 1.80
+    trackman_entity_team_penalty: float = 16.0
+    trackman_entity_team_min_support: int = 3
+    trackman_entity_team_min_dominance: float = 0.50
+    # Fail closed if the final 2019--2024 -> 2025 resolver is too sparse or
+    # violates its one-to-one contract.  This prevents a silent weak submit.
+    trackman_entity_min_matched_pitchers: int = 150
+    trackman_entity_min_row_coverage: float = 0.45
+    trackman_entity_min_team_mappings: int = 9
+
     # All are fitted on training rows only. High-cardinality player IDs are
     # intentionally categorical: CatBoost's ordered statistics can use them
     # without hand-written target encoding.
@@ -211,3 +231,8 @@ class ExperimentConfig:
     submission_gate_2023_max_brier: float = 0.25018
     submission_gate_2024_max_brier: float = 0.24770
     submission_gate_late_min_blend_gain: float = 0.00005
+    # Paired XGBoost ablation isolates the new physical/entity feature family
+    # from model-family and ensemble changes.  Both closest temporal proxies
+    # must clear a non-trivial Brier improvement before a zip is produced.
+    submission_gate_entity_2024_min_gain: float = 0.00003
+    submission_gate_entity_late_min_gain: float = 0.00003

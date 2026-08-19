@@ -39,7 +39,7 @@ def _load_csv(path: Path) -> pd.DataFrame:
 
 
 def _validate_inputs(test: pd.DataFrame, sample: pd.DataFrame, bundle) -> None:
-    if bundle.get("bundle_version") != 5:
+    if bundle.get("bundle_version") != 6:
         raise ValueError(f"Unsupported bundle version: {bundle.get('bundle_version')}")
     if bundle.get("id_col") != ID_COL or bundle.get("target_col") != TARGET_COL:
         raise ValueError("Bundle column contract does not match the competition contract.")
