@@ -1,0 +1,2 @@
+xgboost==3.2.0
+tabdpt==1.2.0
