@@ -272,6 +272,17 @@ print(f"[PREFLIGHT] PASS requirements={path}")
 PY
 )
 
+echo "[PREFLIGHT] Exercising feature and neural source contracts"
+(
+    cd "${PROJECT_DIR}"
+    python -m unittest \
+        tests.test_feature_config_alignment \
+        tests.test_neural_config_alignment \
+        tests.test_neural_contract \
+        -q
+)
+echo "[PREFLIGHT] PASS feature/neural source contracts"
+
 echo "[STAGE] Copying source code to ${LOCAL_PROJECT}"
 rsync -a \
     --exclude=".git/" \
