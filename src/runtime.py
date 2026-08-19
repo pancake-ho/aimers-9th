@@ -8,7 +8,7 @@ import pandas as pd
 
 ID_COL = "row_id"
 TARGET_COL = "control_success"
-FEATURE_VERSION = 3
+FEATURE_VERSION = 4
 
 PITCHER_RATE_COLS = (
     "asof_pitcher_success_rate",
@@ -179,6 +179,8 @@ def build_features(df: pd.DataFrame, feature_state: Mapping[str, object]) -> pd.
     prior = float(feature_state["smoothing_prior"])
     pitcher_strength = float(feature_state["pitcher_prior_strength"])
     batter_strength = float(feature_state["batter_prior_strength"])
+    residual_strength = float(feature_state.get("residual_prior_strength", 1000.0))
+    residual_clip = float(feature_state.get("residual_probability_clip", 0.02))
     cold_start = int(feature_state.get("cold_start_threshold", 50))
 
     balls = _numeric(out["balls_before"], -1)
@@ -394,6 +396,34 @@ def build_features(df: pd.DataFrame, feature_state: Mapping[str, object]) -> pd.
             )
         ).astype(np.float32)
 
+    # Hierarchical offset for residual probability learning.  The official
+    # current-season asof rate is shrunk toward a strictly-past pitcher prior.
+    # The prior is centred on 0.5, so cross-season league-wide drift is not
+    # copied into the hidden season.  No statistic is computed from test rows.
+    history_effect = (
+        _numeric(out["hist_pitcher_effect"], 0.0)
+        if "hist_pitcher_effect" in out.columns
+        else pd.Series(0.0, index=out.index, dtype=np.float32)
+    )
+    history_available = (
+        _numeric(out["hist_pitcher_available"], 0.0)
+        if "hist_pitcher_available" in out.columns
+        else pd.Series(0.0, index=out.index, dtype=np.float32)
+    )
+    hierarchical_prior = (prior + history_effect).clip(residual_clip, 1.0 - residual_clip)
+    hierarchical_prior = hierarchical_prior.where(history_available > 0.0, prior)
+    current_success = _numeric(
+        out["asof_pitcher_success_rate"], prior
+    ).clip(0.0, 1.0)
+    hierarchical_rate = (
+        (pitcher_n * current_success + residual_strength * hierarchical_prior)
+        / (pitcher_n + residual_strength)
+    ).clip(residual_clip, 1.0 - residual_clip)
+    out["hierarchical_success_rate"] = hierarchical_rate.astype(np.float32)
+    out["hierarchical_success_logit"] = np.log(
+        hierarchical_rate / (1.0 - hierarchical_rate)
+    ).astype(np.float32)
+
     return out
 
 
@@ -415,6 +445,20 @@ def preprocess_frame(df: pd.DataFrame, state: Mapping[str, object]) -> pd.DataFr
 def apply_probability_bias(prediction, bias: float) -> np.ndarray:
     pred = np.asarray(prediction, dtype=np.float64)
     return np.clip(pred - float(bias), 1e-6, 1.0 - 1e-6)
+
+
+def apply_logit_intercept(prediction, intercept: float) -> np.ndarray:
+    """Apply a train-fitted intercept without distorting probability bounds."""
+    pred = np.clip(np.asarray(prediction, dtype=np.float64), 1e-6, 1.0 - 1e-6)
+    logit = np.log(pred) - np.log1p(-pred)
+    shifted = logit + float(intercept)
+    # Stable sigmoid for the small calibration range used by training.
+    output = np.empty_like(shifted)
+    positive = shifted >= 0.0
+    output[positive] = 1.0 / (1.0 + np.exp(-shifted[positive]))
+    exp_value = np.exp(shifted[~positive])
+    output[~positive] = exp_value / (1.0 + exp_value)
+    return np.clip(output, 1e-6, 1.0 - 1e-6)
 
 
 def blend_predictions(predictions: Sequence[np.ndarray], weights: Sequence[float]) -> np.ndarray:

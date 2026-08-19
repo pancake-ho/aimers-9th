@@ -16,7 +16,7 @@ if str(PROJECT_ROOT) not in sys.path:
 from src.config import FeatureConfig
 from src.features import LeakageSafeFeatureEngineer
 from src.preprocessing import TabularPreprocessor
-from src.runtime import apply_probability_bias, blend_predictions
+from src.runtime import apply_logit_intercept, blend_predictions
 
 
 def _raw_rows() -> pd.DataFrame:
@@ -120,8 +120,15 @@ class RuntimeContractTests(unittest.TestCase):
             [np.array([0.1, 0.9]), np.array([0.3, 0.7])],
             [0.43, 0.57],
         )
-        corrected = apply_probability_bias(pred, 0.01)
+        corrected = apply_logit_intercept(pred, 0.01)
         self.assertTrue(((corrected > 0.0) & (corrected < 1.0)).all())
+
+    def test_hierarchical_offset_is_finite_and_row_independent(self):
+        features = self.engineer.transform(self.raw)
+        self.assertIn("hierarchical_success_rate", features)
+        self.assertIn("hierarchical_success_logit", features)
+        self.assertTrue(np.isfinite(features["hierarchical_success_logit"]).all())
+        self.assertTrue(features["hierarchical_success_rate"].between(0.02, 0.98).all())
 
 
 if __name__ == "__main__":

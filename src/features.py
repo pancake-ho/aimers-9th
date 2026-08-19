@@ -407,6 +407,10 @@ class LeakageSafeFeatureEngineer:
             "pitcher_prior_strength": float(self.config.pitcher_prior_strength),
             "batter_prior_strength": float(self.config.batter_prior_strength),
             "cold_start_threshold": int(self.config.cold_start_threshold),
+            "residual_prior_strength": float(self.config.residual_prior_strength),
+            "residual_probability_clip": float(
+                self.config.residual_probability_clip
+            ),
             "trackman": (
                 None
                 if self.trackman_features is None

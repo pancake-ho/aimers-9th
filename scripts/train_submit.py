@@ -15,7 +15,6 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from src.config import ExperimentConfig, ModelConfig, NeuralConfig
 from src.data import load_csv, validate_train_schema
-from src.models import validate_xgboost_backend
 from src.training import (
     build_feature_table,
     run_temporal_validation,
@@ -36,12 +35,6 @@ def parse_args():
         help="GPU is faster for local training; CPU is the reproducible default.",
     )
     parser.add_argument(
-        "--xgb-device",
-        choices=("cpu", "cuda"),
-        default="cpu",
-        help="Use cuda inside a Slurm GPU allocation; submission inference remains CPU.",
-    )
-    parser.add_argument(
         "--nn-device",
         choices=("auto", "cpu", "cuda"),
         default="cuda",
@@ -50,7 +43,7 @@ def parse_args():
     parser.add_argument(
         "--disable-neural",
         action="store_true",
-        help="Train a leakage-safe XGBoost+CatBoost fallback without PyTorch models.",
+        help="Train a leakage-safe CatBoost fallback without TabM.",
     )
     return parser.parse_args()
 
@@ -61,17 +54,15 @@ def main():
         use_trackman=not args.no_trackman,
         models=ModelConfig(
             cat_task_type=args.cat_task_type,
-            xgb_device=args.xgb_device,
         ),
         neural=NeuralConfig(enabled=not args.disable_neural, device=args.nn_device),
     )
-    validate_xgboost_backend(config.models)
     if config.neural.enabled:
         from src.neural import validate_neural_backend
 
         validate_neural_backend(config.neural)
     else:
-        print("[BACKEND] Neural models disabled; using XGBoost+CatBoost CPU fallback")
+        print("[BACKEND] Neural models disabled; using CatBoost CPU fallback")
     build_dir = config.paths.submission_build_dir
     model_dir = build_dir / "model"
     if args.clean and build_dir.exists():
@@ -97,6 +88,13 @@ def main():
     )
     with open(model_dir / "validation_report.json", "w", encoding="utf-8") as handle:
         json.dump(validation_report, handle, indent=2, ensure_ascii=False)
+    submission_gate = validation_report["submission_gate"]
+    print("[GATE] " + json.dumps(submission_gate, ensure_ascii=False))
+    if not submission_gate["passed"]:
+        raise RuntimeError(
+            "Submission quality gate failed; validation_report.json contains the "
+            "failed checks. Refusing to train/package a weaker leaderboard model."
+        )
 
     manifest = train_and_save_final_models(
         train=train,

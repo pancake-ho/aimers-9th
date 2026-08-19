@@ -1,118 +1,79 @@
 from __future__ import annotations
 
-import importlib.util
-import sys
 import unittest
-from pathlib import Path
 
 import numpy as np
 
-
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
-
-HAS_BACKENDS = all(
-    importlib.util.find_spec(name) is not None
-    for name in ("xgboost", "catboost")
+from src.calibration import (
+    fit_prequential_logit_calibrator,
+    select_stable_weights,
 )
-
-if HAS_BACKENDS:
-    from src.calibration import select_stable_weights
-    from src.models import MODEL_ORDER, RESNET_MODEL_ORDER
+from src.models import MODEL_ORDER
 
 
-@unittest.skipUnless(HAS_BACKENDS, "GBDT training backends are not installed")
-class FourModelEnsembleTests(unittest.TestCase):
-    def test_simplex_search_supports_three_model_next_submission(self):
+class RegimeEnsembleTests(unittest.TestCase):
+    def test_two_model_simplex_uses_three_forward_folds(self):
         y = np.asarray([0, 0, 1, 1], dtype=np.float64)
         folds = [
             {
                 "y_true": y,
                 "predictions": {
-                    "xgb": np.asarray([0.3, 0.4, 0.6, 0.7]),
-                    "cat": np.asarray([0.4, 0.4, 0.6, 0.6]),
-                    "resnet": np.asarray([0.1, 0.1, 0.9, 0.9]),
+                    "cat": np.asarray([0.30, 0.40, 0.60, 0.70]),
+                    "tabm": np.asarray([0.20, 0.30, 0.70, 0.80]),
                 },
             },
             {
                 "y_true": y,
                 "predictions": {
-                    "xgb": np.asarray([0.2, 0.3, 0.7, 0.8]),
-                    "cat": np.asarray([0.3, 0.4, 0.6, 0.7]),
-                    "resnet": np.asarray([0.1, 0.2, 0.8, 0.9]),
+                    "cat": np.asarray([0.25, 0.35, 0.65, 0.75]),
+                    "tabm": np.asarray([0.15, 0.25, 0.75, 0.85]),
+                },
+            },
+            {
+                "y_true": y,
+                "predictions": {
+                    "cat": np.asarray([0.35, 0.40, 0.60, 0.65]),
+                    "tabm": np.asarray([0.10, 0.20, 0.80, 0.90]),
                 },
             },
         ]
         weights, report = select_stable_weights(
             folds,
-            fold_importance=(0.2, 0.8),
+            fold_importance=(0.15, 0.35, 0.50),
             step=0.025,
-            model_order=RESNET_MODEL_ORDER,
+            model_order=MODEL_ORDER,
         )
-        self.assertEqual(tuple(RESNET_MODEL_ORDER), ("xgb", "cat", "resnet"))
-        self.assertEqual(weights.shape, (3,))
+        self.assertEqual(tuple(MODEL_ORDER), ("cat", "tabm"))
+        self.assertEqual(weights.shape, (2,))
         self.assertAlmostEqual(float(weights.sum()), 1.0)
-        self.assertGreater(float(weights[2]), 0.0)
-        self.assertEqual(report["model_order"], list(RESNET_MODEL_ORDER))
+        self.assertGreater(float(weights[1]), 0.0)
+        self.assertEqual(report["fold_importance"], [0.15, 0.35, 0.5])
 
-    def test_simplex_search_supports_four_models_and_recent_fold_weighting(self):
+    def test_logit_calibration_requires_forward_transfer(self):
         y = np.asarray([0, 0, 1, 1], dtype=np.float64)
         earlier = {
             "y_true": y,
             "predictions": {
-                "xgb": np.asarray([0.2, 0.3, 0.7, 0.8]),
-                "cat": np.asarray([0.1, 0.2, 0.8, 0.9]),
-                "resnet": np.asarray([0.3, 0.4, 0.6, 0.7]),
-                "ft_transformer": np.asarray([0.4, 0.4, 0.6, 0.6]),
+                "cat": np.asarray([0.35, 0.45, 0.75, 0.85]),
+                "tabm": np.asarray([0.30, 0.40, 0.70, 0.80]),
             },
         }
         recent = {
             "y_true": y,
             "predictions": {
-                "xgb": np.asarray([0.3, 0.4, 0.6, 0.7]),
-                "cat": np.asarray([0.4, 0.4, 0.6, 0.6]),
-                "resnet": np.asarray([0.1, 0.1, 0.9, 0.9]),
-                "ft_transformer": np.asarray([0.2, 0.2, 0.8, 0.8]),
+                "cat": np.asarray([0.30, 0.40, 0.70, 0.80]),
+                "tabm": np.asarray([0.25, 0.35, 0.65, 0.75]),
             },
         }
-        weights, report = select_stable_weights(
-            [earlier, recent], fold_importance=(0.2, 0.8), step=0.05
+        report = fit_prequential_logit_calibrator(
+            earlier,
+            recent,
+            weights=(0.5, 0.5),
+            model_order=MODEL_ORDER,
         )
-        self.assertEqual(tuple(MODEL_ORDER), ("xgb", "cat", "resnet", "ft_transformer"))
-        self.assertEqual(weights.shape, (4,))
-        self.assertAlmostEqual(float(weights.sum()), 1.0)
-        self.assertGreaterEqual(float(weights[2] + weights[3]), 0.5)
-        self.assertEqual(report["fold_importance"], [0.2, 0.8])
-
-    def test_simplex_search_supports_gbdt_only_fallback(self):
-        y = np.asarray([0, 0, 1, 1], dtype=np.float64)
-        folds = [
-            {
-                "y_true": y,
-                "predictions": {
-                    "xgb": np.asarray([0.2, 0.3, 0.7, 0.8]),
-                    "cat": np.asarray([0.3, 0.4, 0.6, 0.7]),
-                },
-            },
-            {
-                "y_true": y,
-                "predictions": {
-                    "xgb": np.asarray([0.1, 0.2, 0.8, 0.9]),
-                    "cat": np.asarray([0.4, 0.4, 0.6, 0.6]),
-                },
-            },
-        ]
-        order = ("xgb", "cat")
-        weights, report = select_stable_weights(
-            folds,
-            fold_importance=(0.2, 0.8),
-            step=0.025,
-            model_order=order,
-        )
-        self.assertEqual(weights.shape, (2,))
-        self.assertAlmostEqual(float(weights.sum()), 1.0)
-        self.assertEqual(report["model_order"], list(order))
+        self.assertEqual(report["method"], "logit_intercept")
+        self.assertIn("recent_transferred_brier", report)
+        self.assertTrue(np.isfinite(report["intercept"]))
 
 
 if __name__ == "__main__":

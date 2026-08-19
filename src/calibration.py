@@ -5,7 +5,7 @@ from typing import Dict, Mapping, Sequence
 import numpy as np
 
 from src.models import MODEL_ORDER
-from src.runtime import apply_probability_bias, blend_predictions
+from src.runtime import apply_logit_intercept, apply_probability_bias, blend_predictions
 
 
 def brier_score(y_true, prediction) -> float:
@@ -145,6 +145,72 @@ def fit_prequential_bias_calibrator(
         "bias": float(final_bias),
         "earlier_bias": float(earlier_bias),
         "recent_bias": float(recent_bias),
+        "recent_raw_brier": float(recent_raw_brier),
+        "recent_transferred_brier": float(transferred_brier),
+        "transfer_gain": float(recent_raw_brier - transferred_brier),
+    }
+
+
+def _best_brier_logit_intercept(y_true, prediction) -> float:
+    """Deterministic coarse-to-fine one-dimensional Brier optimization."""
+    y = np.asarray(y_true, dtype=np.float64)
+    pred = np.asarray(prediction, dtype=np.float64)
+    center = 0.0
+    radius = 0.30
+    best = 0.0
+    for _ in range(4):
+        candidates = np.linspace(center - radius, center + radius, 121)
+        scores = np.asarray(
+            [brier_score(y, apply_logit_intercept(pred, value)) for value in candidates]
+        )
+        best = float(candidates[int(np.argmin(scores))])
+        center = best
+        radius /= 10.0
+    return best
+
+
+def fit_prequential_logit_calibrator(
+    earlier_fold: Mapping[str, object],
+    recent_fold: Mapping[str, object],
+    weights: Sequence[float],
+    model_order: Sequence[str] = MODEL_ORDER,
+    min_gain: float = 1e-7,
+) -> Dict[str, object]:
+    """Accept a logit intercept only after year-ahead transfer succeeds.
+
+    The intercept is estimated on the earlier holdout and frozen before being
+    evaluated on the next season.  Only a successful, direction-consistent
+    transfer allows refitting on the latest full-season holdout for 2025.
+    """
+    earlier_pred = blend_predictions(
+        [earlier_fold["predictions"][name] for name in model_order], weights
+    )
+    recent_pred = blend_predictions(
+        [recent_fold["predictions"][name] for name in model_order], weights
+    )
+    earlier_intercept = _best_brier_logit_intercept(
+        earlier_fold["y_true"], earlier_pred
+    )
+    recent_intercept = _best_brier_logit_intercept(
+        recent_fold["y_true"], recent_pred
+    )
+    recent_raw_brier = brier_score(recent_fold["y_true"], recent_pred)
+    transferred = apply_logit_intercept(recent_pred, earlier_intercept)
+    transferred_brier = brier_score(recent_fold["y_true"], transferred)
+    same_direction = (
+        earlier_intercept == 0.0
+        or recent_intercept == 0.0
+        or np.sign(earlier_intercept) == np.sign(recent_intercept)
+    )
+    accepted = bool(
+        same_direction and transferred_brier <= recent_raw_brier - min_gain
+    )
+    return {
+        "method": "logit_intercept",
+        "accepted": accepted,
+        "intercept": float(recent_intercept if accepted else 0.0),
+        "earlier_intercept": float(earlier_intercept),
+        "recent_intercept": float(recent_intercept),
         "recent_raw_brier": float(recent_raw_brier),
         "recent_transferred_brier": float(transferred_brier),
         "transfer_gain": float(recent_raw_brier - transferred_brier),

@@ -17,7 +17,7 @@ if TYPE_CHECKING:
     from src.config import NeuralConfig
 
 
-NEURAL_MODEL_ORDER = ("resnet", "ft_transformer")
+NEURAL_MODEL_ORDER = ("tabm", "resnet", "ft_transformer")
 
 
 def seed_everything(seed: int) -> None:
@@ -59,9 +59,17 @@ def validate_neural_backend(config: NeuralConfig) -> None:
         "num_cols": ["n0", "n1"],
         "cat_cols": ["c0", "c1"],
         "cardinalities": [4, 5],
+        "numeric_mean": [0.0, 0.0],
+        "numeric_std": [1.0, 1.0],
+        "offset_col": "n0",
+        "offset_index": 0,
     }
     probe_config = replace(
         config,
+        tabm_k=4,
+        tabm_d_block=16,
+        tabm_n_blocks=2,
+        tabm_offset_col="n0",
         resnet_d_main=16,
         resnet_d_hidden=24,
         resnet_n_blocks=1,
@@ -77,7 +85,8 @@ def validate_neural_backend(config: NeuralConfig) -> None:
         model = build_model(spec).to(device)
         model.train()
         logits = model(x_num, x_cat)
-        if logits.shape != (8,) or not torch.isfinite(logits).all():
+        expected_shape = (8, int(probe_config.tabm_k)) if kind == "tabm" else (8,)
+        if logits.shape != expected_shape or not torch.isfinite(logits).all():
             raise RuntimeError(f"{kind} backend preflight returned invalid output.")
         logits.square().mean().backward()
         del model, logits
@@ -98,9 +107,15 @@ class NeuralPreprocessor:
     ordinal categories so index 0 is reserved for future/unknown categories.
     """
 
-    def __init__(self, categorical_cols: Sequence[str], numerical_cols: Sequence[str]):
+    def __init__(
+        self,
+        categorical_cols: Sequence[str],
+        numerical_cols: Sequence[str],
+        offset_col: str = "hierarchical_success_logit",
+    ):
         self.cat_cols = list(categorical_cols)
         self.num_cols = list(numerical_cols)
+        self.offset_col = str(offset_col)
         self.numeric_mean: np.ndarray | None = None
         self.numeric_std: np.ndarray | None = None
         self.cardinalities: list[int] = []
@@ -131,6 +146,11 @@ class NeuralPreprocessor:
     def export_state(self) -> Dict[str, object]:
         if self.numeric_mean is None or self.numeric_std is None:
             raise RuntimeError("NeuralPreprocessor must be fitted before export.")
+        offset_index = (
+            self.num_cols.index(self.offset_col)
+            if self.offset_col in self.num_cols
+            else None
+        )
         return {
             "state_version": 1,
             "cat_cols": list(self.cat_cols),
@@ -139,6 +159,8 @@ class NeuralPreprocessor:
             "numeric_std": self.numeric_std.tolist(),
             "cardinalities": list(self.cardinalities),
             "numeric_clip": 8.0,
+            "offset_col": self.offset_col,
+            "offset_index": offset_index,
         }
 
 
@@ -355,6 +377,95 @@ class FTTransformer(nn.Module):
         return self.head(x).squeeze(1)
 
 
+def _init_random_signs_(tensor: torch.Tensor) -> None:
+    with torch.no_grad():
+        tensor.bernoulli_(0.5).mul_(2.0).sub_(1.0)
+
+
+class LinearBatchEnsemble(nn.Module):
+    """Parameter-efficient BatchEnsemble linear layer used by TabM."""
+
+    def __init__(
+        self,
+        in_features: int,
+        out_features: int,
+        k: int,
+        *,
+        first_layer: bool = False,
+    ) -> None:
+        super().__init__()
+        self.weight = nn.Parameter(torch.empty(out_features, in_features))
+        self.r = nn.Parameter(torch.empty(k, in_features))
+        self.s = nn.Parameter(torch.empty(k, out_features))
+        self.bias = nn.Parameter(torch.empty(k, out_features))
+        nn.init.kaiming_uniform_(self.weight, a=math.sqrt(5))
+        if first_layer:
+            _init_random_signs_(self.r)
+        else:
+            nn.init.ones_(self.r)
+        nn.init.ones_(self.s)
+        bound = 1.0 / math.sqrt(max(1, in_features))
+        nn.init.uniform_(self.bias, -bound, bound)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if x.ndim != 3:
+            raise ValueError(f"BatchEnsemble input must be BxKxD; got {tuple(x.shape)}")
+        x = (x * self.r.unsqueeze(0)) @ self.weight.T
+        return x * self.s.unsqueeze(0) + self.bias.unsqueeze(0)
+
+
+class TabMResidual(nn.Module):
+    """TabM-style efficient ensemble that predicts corrections to a base logit."""
+
+    def __init__(self, spec: Mapping[str, object]) -> None:
+        super().__init__()
+        cardinalities = [int(value) for value in spec["cardinalities"]]
+        embedding_dims = [int(value) for value in spec["embedding_dims"]]
+        self.embeddings = nn.ModuleList(
+            [
+                nn.Embedding(cardinality, dimension)
+                for cardinality, dimension in zip(cardinalities, embedding_dims)
+            ]
+        )
+        self.k = int(spec["k"])
+        self.offset_index = int(spec["offset_index"])
+        self.offset_mean = float(spec["offset_mean"])
+        self.offset_std = float(spec["offset_std"])
+        input_dim = int(spec["n_num"]) + sum(embedding_dims)
+        d_block = int(spec["d_block"])
+        n_blocks = int(spec["n_blocks"])
+        self.layers = nn.ModuleList()
+        for index in range(n_blocks):
+            self.layers.append(
+                LinearBatchEnsemble(
+                    input_dim if index == 0 else d_block,
+                    d_block,
+                    self.k,
+                    first_layer=index == 0,
+                )
+            )
+        self.dropout = nn.Dropout(float(spec["dropout"]))
+        self.output_weight = nn.Parameter(torch.zeros(self.k, d_block))
+        self.output_bias = nn.Parameter(torch.zeros(self.k))
+
+    def forward(self, x_num: torch.Tensor, x_cat: torch.Tensor) -> torch.Tensor:
+        base_logit = (
+            x_num[:, self.offset_index] * self.offset_std + self.offset_mean
+        )
+        pieces = [x_num]
+        pieces.extend(
+            embedding(x_cat[:, index])
+            for index, embedding in enumerate(self.embeddings)
+        )
+        x = torch.cat(pieces, dim=1)
+        x = x[:, None, :].expand(-1, self.k, -1)
+        for layer in self.layers:
+            x = self.dropout(torch.relu(layer(x)))
+        residual = (x * self.output_weight.unsqueeze(0)).sum(dim=-1)
+        residual = residual + self.output_bias.unsqueeze(0)
+        return base_logit[:, None] + residual
+
+
 def make_model_spec(
     kind: str,
     neural_state: Mapping[str, object],
@@ -376,6 +487,27 @@ def make_model_spec(
                 "n_blocks": int(config.resnet_n_blocks),
                 "dropout_first": float(config.resnet_dropout_first),
                 "dropout_second": float(config.resnet_dropout_second),
+            }
+        )
+    elif kind == "tabm":
+        offset_index = neural_state.get("offset_index")
+        if offset_index is None:
+            raise ValueError(
+                f"TabM offset column is absent: {config.tabm_offset_col}"
+            )
+        offset_index = int(offset_index)
+        numeric_mean = list(neural_state["numeric_mean"])
+        numeric_std = list(neural_state["numeric_std"])
+        common.update(
+            {
+                "embedding_dims": _embedding_dims(cardinalities),
+                "k": int(config.tabm_k),
+                "d_block": int(config.tabm_d_block),
+                "n_blocks": int(config.tabm_n_blocks),
+                "dropout": float(config.tabm_dropout),
+                "offset_index": offset_index,
+                "offset_mean": float(numeric_mean[offset_index]),
+                "offset_std": float(numeric_std[offset_index]),
             }
         )
     elif kind == "ft_transformer":
@@ -401,16 +533,22 @@ def build_model(spec: Mapping[str, object]) -> nn.Module:
     kind = str(spec["kind"])
     if kind == "resnet":
         return TabularResNet(spec)
+    if kind == "tabm":
+        return TabMResidual(spec)
     if kind == "ft_transformer":
         return FTTransformer(spec)
     raise ValueError(f"Unknown neural model kind: {kind}")
 
 
 def _batch_size(kind: str, config: NeuralConfig) -> int:
+    if kind == "tabm":
+        return int(config.tabm_batch_size)
     return int(config.resnet_batch_size if kind == "resnet" else config.ft_batch_size)
 
 
 def _eval_batch_size(kind: str, config: NeuralConfig) -> int:
+    if kind == "tabm":
+        return int(config.tabm_eval_batch_size)
     return int(
         config.resnet_eval_batch_size
         if kind == "resnet"
@@ -419,6 +557,8 @@ def _eval_batch_size(kind: str, config: NeuralConfig) -> int:
 
 
 def _optimizer_hparams(kind: str, config: NeuralConfig) -> tuple[float, float]:
+    if kind == "tabm":
+        return float(config.tabm_learning_rate), float(config.tabm_weight_decay)
     if kind == "resnet":
         return float(config.resnet_learning_rate), float(config.resnet_weight_decay)
     if kind == "ft_transformer":
@@ -427,6 +567,12 @@ def _optimizer_hparams(kind: str, config: NeuralConfig) -> tuple[float, float]:
 
 
 def _training_limits(kind: str, config: NeuralConfig) -> tuple[int, int, int]:
+    if kind == "tabm":
+        return (
+            int(config.tabm_max_epochs),
+            int(config.tabm_min_epochs),
+            int(config.tabm_early_stopping_patience),
+        )
     if kind == "resnet":
         return (
             int(config.resnet_max_epochs),
@@ -481,6 +627,8 @@ def predict_model(
         x_cat = x_cat.to(device, non_blocking=True)
         with _autocast(device):
             probability = torch.sigmoid(model(x_num, x_cat))
+            if probability.ndim == 2:
+                probability = probability.mean(dim=1)
         output.append(probability.float().cpu().numpy())
     return np.concatenate(output).astype(np.float64, copy=False)
 
@@ -534,9 +682,15 @@ def train_neural_fold(
             optimizer.zero_grad(set_to_none=True)
             with _autocast(device):
                 logits = model(x_num, x_cat)
-                per_row = torch.nn.functional.binary_cross_entropy_with_logits(
-                    logits, target, reduction="none"
-                )
+                if logits.ndim == 2:
+                    target_for_loss = target[:, None].expand_as(logits)
+                    per_row = torch.nn.functional.binary_cross_entropy_with_logits(
+                        logits, target_for_loss, reduction="none"
+                    ).mean(dim=1)
+                else:
+                    per_row = torch.nn.functional.binary_cross_entropy_with_logits(
+                        logits, target, reduction="none"
+                    )
                 loss = (per_row * weight).sum() / weight.sum().clamp_min(1e-12)
             scaler.scale(loss).backward()
             scaler.unscale_(optimizer)
@@ -625,9 +779,15 @@ def train_neural_full(
             optimizer.zero_grad(set_to_none=True)
             with _autocast(device):
                 logits = model(x_num, x_cat)
-                per_row = torch.nn.functional.binary_cross_entropy_with_logits(
-                    logits, target, reduction="none"
-                )
+                if logits.ndim == 2:
+                    target_for_loss = target[:, None].expand_as(logits)
+                    per_row = torch.nn.functional.binary_cross_entropy_with_logits(
+                        logits, target_for_loss, reduction="none"
+                    ).mean(dim=1)
+                else:
+                    per_row = torch.nn.functional.binary_cross_entropy_with_logits(
+                        logits, target, reduction="none"
+                    )
                 loss = (per_row * weight).sum() / weight.sum().clamp_min(1e-12)
             scaler.scale(loss).backward()
             scaler.unscale_(optimizer)

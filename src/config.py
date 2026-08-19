@@ -49,6 +49,12 @@ class FeatureConfig:
     pitcher_prior_strength: float = 100.0
     batter_prior_strength: float = 50.0
     cold_start_threshold: int = 50
+    # The residual learner starts from a conservative empirical-Bayes
+    # probability instead of relearning the global base rate.  A strong
+    # shrinkage level was deliberately chosen because the raw within-season
+    # pitcher rate is noisy and the league target mean drifts across years.
+    residual_prior_strength: float = 1000.0
+    residual_probability_clip: float = 0.02
 
     # Strictly-past cross-season target profiles.  These expose stable,
     # pitcher-specific context effects to every model while retaining the
@@ -85,11 +91,15 @@ class FeatureConfig:
         "batter_experience_bin",
     )
 
-    # season is deliberately retained as a numeric feature. A tree trained
-    # through 2024 routes 2025 to the newest side of its temporal splits.
+    # Absolute season cannot extrapolate reliably to an unseen year.  The
+    # binary ABS-regime feature remains available, while season/index features
+    # are excluded from both CatBoost and TabM.
     excluded_cols: Tuple[str, ...] = (
         "row_id",
         "control_success",
+        "season",
+        "season_index",
+        "years_since_abs",
     )
 
 
@@ -97,7 +107,7 @@ class FeatureConfig:
 class ModelConfig:
     random_seed: int = 2026
     # Seraph allocates 16 CPU cores. Submission inference separately caps the
-    # loaded XGBoost booster and PyTorch runtime at the DACON limit of 6.
+    # PyTorch runtime at the DACON limit of 6.
     num_threads: int = 16
 
     xgb_learning_rate: float = 0.03
@@ -131,13 +141,29 @@ class NeuralConfig:
     """Training settings for optional out-of-family tabular learners."""
 
     enabled: bool = True
-    # Add one genuinely different learner before widening the ensemble.  The
-    # FT-Transformer remains implemented for later ablation, but the next
-    # leaderboard submission deliberately uses only the lower-cost ResNet.
-    models: Tuple[str, ...] = ("resnet",)
+    # The next submission uses a single parameter-efficient neural family.
+    # Legacy ResNet/FT-Transformer code remains available for controlled
+    # ablations, but is not part of the submitted ensemble.
+    models: Tuple[str, ...] = ("tabm",)
     device: str = "cuda"
     num_workers: int = 0
     max_grad_norm: float = 1.0
+
+    # TabM-style BatchEnsemble residual MLP.  The model returns k predictions
+    # that share the expensive weights but keep per-member adapters and heads.
+    # It learns a correction around hierarchical_success_logit.
+    tabm_learning_rate: float = 2e-3
+    tabm_weight_decay: float = 3e-4
+    tabm_max_epochs: int = 12
+    tabm_early_stopping_patience: int = 3
+    tabm_min_epochs: int = 3
+    tabm_batch_size: int = 1024
+    tabm_eval_batch_size: int = 4096
+    tabm_k: int = 32
+    tabm_d_block: int = 256
+    tabm_n_blocks: int = 3
+    tabm_dropout: float = 0.10
+    tabm_offset_col: str = "hierarchical_success_logit"
 
     # ResNet-like MLP: keep the proven 1e-3 AdamW scale, but avoid the very
     # low-update 4096 batch and add regularization for temporal transfer.
@@ -183,9 +209,19 @@ class ExperimentConfig:
     # 2024 is the first season from the same ABS regime as the hidden 2025
     # target. Keep 2023 as a robustness guard, but optimize the blend mainly
     # for the one-step-ahead 2024 fold.
-    temporal_fold_importance: Tuple[float, ...] = (0.20, 0.80)
+    # 2024 late-season is the closest observable same-regime proxy for 2025.
+    # The full 2024 fold remains a larger-sample stability anchor.
+    temporal_fold_importance: Tuple[float, ...] = (0.15, 0.35, 0.50)
     ensemble_grid_step: float = 0.025
     temporal_folds: Tuple[Tuple[Tuple[int, ...], int], ...] = (
         ((2019, 2020, 2021, 2022), 2023),
         ((2019, 2020, 2021, 2022, 2023), 2024),
     )
+    abs_late_train_month_max: int = 6
+    abs_late_valid_months: Tuple[int, ...] = (7, 8, 9)
+    # The 895-point branch recorded about 0.24796 on the 2024 holdout.  A
+    # reduction near 0.00026 is the score-equivalent improvement needed to
+    # reach 1000 from that anchor, so final training is gated at 0.24770.
+    submission_gate_2023_max_brier: float = 0.25018
+    submission_gate_2024_max_brier: float = 0.24770
+    submission_gate_late_min_blend_gain: float = 0.00005

@@ -5,15 +5,25 @@ from typing import Sequence
 
 import numpy as np
 import pandas as pd
-import xgboost as xgb
-from catboost import CatBoostClassifier
+try:  # Legacy ablation backend; not required by the submitted runtime.
+    import xgboost as xgb
+except ImportError:  # pragma: no cover - exercised in lightweight test images
+    xgb = None
+
+try:
+    from catboost import CatBoostClassifier
+except ImportError:  # pragma: no cover - exercised in lightweight test images
+    CatBoostClassifier = None
 
 from src.config import ModelConfig
 
 
-GBDT_MODEL_ORDER = ("xgb", "cat")
+# The submitted ensemble intentionally keeps one tree family and one
+# out-of-family learner.  XGBoost helpers remain below for reproducible legacy
+# ablations, but XGBoost is not trained or packaged by the TabM strategy.
+GBDT_MODEL_ORDER = ("cat",)
 RESNET_MODEL_ORDER = (*GBDT_MODEL_ORDER, "resnet")
-MODEL_ORDER = (*GBDT_MODEL_ORDER, "resnet", "ft_transformer")
+MODEL_ORDER = (*GBDT_MODEL_ORDER, "tabm")
 
 
 def _xgb_brier_metric(prediction, dmatrix):
@@ -57,6 +67,8 @@ def _quantile_dmatrix(
     max_bin must match the hist Booster parameter, including validation
     matrices constructed with a training reference.
     """
+    if xgb is None:
+        raise ImportError("xgboost is required for the legacy XGBoost ablation.")
     return xgb.QuantileDMatrix(
         X,
         label=label,
@@ -74,6 +86,8 @@ def validate_xgboost_backend(config: ModelConfig) -> None:
     This one-round check runs before the 1.47M-row feature build. It exercises
     the same QuantileDMatrix + hist path used by temporal and final training.
     """
+    if xgb is None:
+        raise ImportError("xgboost is not installed.")
     if int(config.xgb_max_bin) < 2:
         raise ValueError(f"xgb_max_bin must be >= 2; got {config.xgb_max_bin}")
     if config.xgb_device.lower() not in {"cpu", "cuda"}:
@@ -196,6 +210,8 @@ def train_catboost_fold(
     categorical_indices: Sequence[int],
     config: ModelConfig,
 ):
+    if CatBoostClassifier is None:
+        raise ImportError("catboost is not installed.")
     model = CatBoostClassifier(**_catboost_params(config))
     model.fit(
         X_train,
@@ -221,6 +237,8 @@ def train_catboost_full(
     config: ModelConfig,
     iterations: int,
 ):
+    if CatBoostClassifier is None:
+        raise ImportError("catboost is not installed.")
     model = CatBoostClassifier(**_catboost_params(config, iterations=iterations))
     model.fit(
         X_train,

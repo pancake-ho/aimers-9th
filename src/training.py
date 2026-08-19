@@ -11,7 +11,7 @@ import numpy as np
 import pandas as pd
 
 from src.calibration import (
-    fit_prequential_bias_calibrator,
+    fit_prequential_logit_calibrator,
     select_stable_weights,
 )
 from src.config import ExperimentConfig
@@ -25,15 +25,13 @@ from src.models import (
     GBDT_MODEL_ORDER,
     train_catboost_fold,
     train_catboost_full,
-    train_xgboost_fold,
-    train_xgboost_full,
 )
 from src.preprocessing import TabularPreprocessor
-from src.runtime import apply_probability_bias, blend_predictions
-from src.splits import make_temporal_folds, uniform_weights
+from src.runtime import apply_logit_intercept, blend_predictions
+from src.splits import make_abs_late_fold, make_temporal_folds, uniform_weights
 
 
-NEURAL_MODEL_ORDER = ("resnet", "ft_transformer")
+NEURAL_MODEL_ORDER = ("tabm", "resnet", "ft_transformer")
 
 
 def _active_neural_models(config: ExperimentConfig) -> tuple[str, ...]:
@@ -52,11 +50,11 @@ def _active_neural_models(config: ExperimentConfig) -> tuple[str, ...]:
 
 def _strategy_name(model_order: tuple[str, ...]) -> str:
     if model_order == GBDT_MODEL_ORDER:
-        return "temporal_xgb_cat_probability_bias_cpu_fallback_v1"
+        return "temporal_cat_logit_calibration_cpu_fallback_v1"
+    if model_order == (*GBDT_MODEL_ORDER, "tabm"):
+        return "regime_hierarchical_tabm_residual_cat_v1"
     if model_order == (*GBDT_MODEL_ORDER, "resnet"):
-        return "temporal_xgb_cat_resnet_hierarchical_history_v5"
-    if model_order == (*GBDT_MODEL_ORDER, *NEURAL_MODEL_ORDER):
-        return "temporal_gbdt_resnet_ftt_probability_bias_v3"
+        return "temporal_cat_resnet_hierarchical_history_legacy"
     raise ValueError(f"Unsupported model order: {model_order}")
 
 
@@ -106,7 +104,15 @@ def run_temporal_validation(
     model_order = (*GBDT_MODEL_ORDER, *neural_model_order)
     print(f"[ENSEMBLE] active_models={list(model_order)}")
 
-    for fold in make_temporal_folds(train, config.temporal_folds):
+    folds = list(make_temporal_folds(train, config.temporal_folds))
+    folds.append(
+        make_abs_late_fold(
+            train,
+            train_month_max=config.abs_late_train_month_max,
+            valid_months=config.abs_late_valid_months,
+        )
+    )
+    for fold in folds:
         print("\n" + "=" * 88)
         print(
             f"[FOLD] {fold.name}: n_train={len(fold.train_idx):,}, "
@@ -129,22 +135,6 @@ def run_temporal_validation(
         per_model_metrics: Dict[str, Dict[str, float]] = {}
 
         start = time.perf_counter()
-        xgb_model, predictions["xgb"], best_iterations["xgb"] = train_xgboost_fold(
-            X_train,
-            y_train,
-            X_valid,
-            y_valid,
-            sample_weight,
-            config.models,
-        )
-        elapsed = time.perf_counter() - start
-        per_model_metrics["xgb"] = evaluate_probabilities(y_valid, predictions["xgb"])
-        per_model_metrics["xgb"]["train_seconds"] = float(elapsed)
-        _print_metrics(f"{fold.valid_season}/xgb", per_model_metrics["xgb"])
-        del xgb_model
-        gc.collect()
-
-        start = time.perf_counter()
         cat_model, predictions["cat"], best_iterations["cat"] = train_catboost_fold(
             X_train,
             y_train,
@@ -157,7 +147,7 @@ def run_temporal_validation(
         elapsed = time.perf_counter() - start
         per_model_metrics["cat"] = evaluate_probabilities(y_valid, predictions["cat"])
         per_model_metrics["cat"]["train_seconds"] = float(elapsed)
-        _print_metrics(f"{fold.valid_season}/cat", per_model_metrics["cat"])
+        _print_metrics(f"{fold.validation_label}/cat", per_model_metrics["cat"])
         del cat_model
         gc.collect()
 
@@ -172,6 +162,7 @@ def run_temporal_validation(
             neural_preprocessor = NeuralPreprocessor(
                 categorical_cols=preprocessor.cat_cols_,
                 numerical_cols=preprocessor.num_cols_,
+                offset_col=config.neural.tabm_offset_col,
             ).fit(X_train)
             neural_state = neural_preprocessor.export_state()
             train_arrays = prepare_neural_arrays(X_train, neural_state)
@@ -195,7 +186,7 @@ def run_temporal_validation(
                 best_iterations[kind] = int(best_epoch)
                 per_model_metrics[kind] = evaluate_probabilities(y_valid, prediction)
                 per_model_metrics[kind]["train_seconds"] = float(elapsed)
-                _print_metrics(f"{fold.valid_season}/{kind}", per_model_metrics[kind])
+                _print_metrics(f"{fold.validation_label}/{kind}", per_model_metrics[kind])
                 del neural_model, prediction
                 release_torch_memory()
 
@@ -208,6 +199,7 @@ def run_temporal_validation(
             {
                 "name": fold.name,
                 "valid_season": fold.valid_season,
+                "validation_label": fold.validation_label,
                 "y_true": y_valid,
                 "predictions": predictions,
                 "best_iterations": best_iterations,
@@ -217,8 +209,10 @@ def run_temporal_validation(
             }
         )
 
-    if len(fold_results) != 2:
-        raise RuntimeError("This submission strategy requires 2023 and 2024 holdouts.")
+    if len(fold_results) != 3:
+        raise RuntimeError(
+            "This submission strategy requires 2023, 2024 and late-2024 holdouts."
+        )
 
     weights, weight_report = select_stable_weights(
         fold_results,
@@ -226,7 +220,7 @@ def run_temporal_validation(
         step=config.ensemble_grid_step,
         model_order=model_order,
     )
-    calibrator = fit_prequential_bias_calibrator(
+    calibrator = fit_prequential_logit_calibrator(
         earlier_fold=fold_results[0],
         recent_fold=fold_results[1],
         weights=weights,
@@ -239,11 +233,12 @@ def run_temporal_validation(
             [fold["predictions"][name] for name in model_order], weights
         )
         ensemble_metrics = evaluate_probabilities(fold["y_true"], ensemble)
-        _print_metrics(f"{fold['valid_season']}/ensemble", ensemble_metrics)
+        _print_metrics(f"{fold['validation_label']}/ensemble", ensemble_metrics)
         fold_summaries.append(
             {
                 "name": fold["name"],
                 "valid_season": int(fold["valid_season"]),
+                "validation_label": str(fold["validation_label"]),
                 "n_train": fold["n_train"],
                 "n_valid": fold["n_valid"],
                 "best_iterations": fold["best_iterations"],
@@ -256,25 +251,19 @@ def run_temporal_validation(
     recent_ensemble = blend_predictions(
         [recent["predictions"][name] for name in model_order], weights
     )
-    transferred = apply_probability_bias(
-        recent_ensemble, calibrator["earlier_bias"]
+    transferred = apply_logit_intercept(
+        recent_ensemble, calibrator["earlier_intercept"]
     )
     transfer_metrics = evaluate_probabilities(recent["y_true"], transferred)
     print(
         f"[CALIBRATION] accepted={calibrator['accepted']} "
         f"2024 raw={calibrator['recent_raw_brier']:.8f} "
-        f"2023-bias transfer={calibrator['recent_transferred_brier']:.8f} "
-        f"final_bias={calibrator['bias']:+.6f}"
+        f"2023-intercept transfer={calibrator['recent_transferred_brier']:.8f} "
+        f"final_intercept={calibrator['intercept']:+.6f}"
     )
 
     recent_iterations = fold_results[-1]["best_iterations"]
     final_iterations = {
-        "xgb": int(
-            min(
-                config.models.xgb_num_boost_round,
-                max(50, round(recent_iterations["xgb"] * 1.05)),
-            )
-        ),
         "cat": int(
             min(
                 config.models.cat_iterations,
@@ -283,6 +272,7 @@ def run_temporal_validation(
         ),
     }
     neural_epoch_caps = {
+        "tabm": int(config.neural.tabm_max_epochs),
         "resnet": int(config.neural.resnet_max_epochs),
         "ft_transformer": int(config.neural.ft_max_epochs),
     }
@@ -308,6 +298,38 @@ def run_temporal_validation(
         "calibration_transfer_metrics": transfer_metrics,
         "final_iterations": final_iterations,
     }
+    by_label = {item["validation_label"]: item for item in fold_summaries}
+    guard_2023 = float(by_label["2023"]["ensemble"]["brier"])
+    anchor_2024 = float(by_label["2024"]["ensemble"]["brier"])
+    late = by_label["2024_late_abs"]
+    late_ensemble = float(late["ensemble"]["brier"])
+    late_best_component = min(
+        float(metrics["brier"]) for metrics in late["models"].values()
+    )
+    late_blend_gain = late_best_component - late_ensemble
+    checks = {
+        "2023_guard": guard_2023 <= config.submission_gate_2023_max_brier,
+        "2024_target": anchor_2024 <= config.submission_gate_2024_max_brier,
+        "late_abs_blend": (
+            late_blend_gain >= config.submission_gate_late_min_blend_gain
+        ),
+    }
+    report["submission_gate"] = {
+        "passed": bool(all(checks.values())),
+        "checks": checks,
+        "observed": {
+            "2023_brier": guard_2023,
+            "2024_brier": anchor_2024,
+            "2024_late_brier": late_ensemble,
+            "2024_late_best_component_brier": late_best_component,
+            "2024_late_blend_gain": late_blend_gain,
+        },
+        "thresholds": {
+            "2023_max_brier": config.submission_gate_2023_max_brier,
+            "2024_max_brier": config.submission_gate_2024_max_brier,
+            "2024_late_min_blend_gain": config.submission_gate_late_min_blend_gain,
+        },
+    }
     return ensemble_state, report
 
 
@@ -329,20 +351,6 @@ def train_and_save_final_models(
         excluded_cols=config.features.excluded_cols,
     )
     X = preprocessor.fit_transform(features)
-
-    xgb_rounds = int(ensemble_state["final_iterations"]["xgb"])
-    print(f"[FINAL] Training XGBoost for {xgb_rounds} rounds...")
-    xgb_model = train_xgboost_full(
-        X,
-        y,
-        sample_weight,
-        config.models,
-        num_boost_round=xgb_rounds,
-    )
-    xgb_path = model_dir / "xgb_model.json"
-    xgb_model.save_model(str(xgb_path))
-    del xgb_model
-    gc.collect()
 
     cat_iterations = int(ensemble_state["final_iterations"]["cat"])
     print(f"[FINAL] Training CatBoost for {cat_iterations} iterations...")
@@ -374,6 +382,7 @@ def train_and_save_final_models(
         neural_preprocessor = NeuralPreprocessor(
             categorical_cols=preprocessor.cat_cols_,
             numerical_cols=preprocessor.num_cols_,
+            offset_col=config.neural.tabm_offset_col,
         ).fit(X)
         neural_state = neural_preprocessor.export_state()
         train_arrays = prepare_neural_arrays(X, neural_state)
@@ -402,7 +411,7 @@ def train_and_save_final_models(
 
     raw_feature_cols = [col for col in train.columns if col != target]
     bundle = {
-        "bundle_version": 3,
+        "bundle_version": 4,
         "id_col": config.features.id_col,
         "target_col": target,
         "expected_raw_columns": raw_feature_cols,
@@ -422,14 +431,13 @@ def train_and_save_final_models(
 
     manifest = {
         "strategy": _strategy_name(tuple(ensemble_state["model_order"])),
-        "bundle_version": 3,
+        "bundle_version": 4,
         "model_order": list(ensemble_state["model_order"]),
         "weights": list(ensemble_state["weights"]),
         "calibration": dict(ensemble_state["calibration"]),
         "final_iterations": dict(ensemble_state["final_iterations"]),
         "n_features": int(len(preprocessor.feature_names_)),
         "model_files": [
-            xgb_path.name,
             cat_path.name,
             *[neural_paths[name].name for name in neural_model_order],
             bundle_path.name,

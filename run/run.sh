@@ -97,11 +97,9 @@ import catboost
 import numpy
 import pandas
 import torch
-import xgboost
 
 print(f"[ENV] numpy={numpy.__version__}")
 print(f"[ENV] pandas={pandas.__version__}")
-print(f"[ENV] xgboost={xgboost.__version__}")
 print(f"[ENV] catboost={catboost.__version__}")
 print(f"[ENV] torch={torch.__version__}")
 print(f"[ENV] torch_cuda_build={torch.version.cuda}")
@@ -122,7 +120,7 @@ PY
 then
     TORCH_BUILD_OK=0
     echo "[WARN] Preferred PyTorch CUDA build is unavailable."
-    echo "[FALLBACK] Try ResNet on CPU; if PyTorch itself is unusable, retry GBDT-only."
+    echo "[ERROR] TabM requires the pinned PyTorch build; refusing a weaker fallback."
 fi
 
 echo "[RESOURCE] CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-unset}"
@@ -130,7 +128,7 @@ GPU_READY=1
 if ! nvidia-smi; then
     GPU_READY=0
     echo "[WARN] NVIDIA driver could not open the allocated GPU on $(hostname -s)."
-    echo "[FALLBACK] Continue with leakage-safe ResNet and GBDTs on CPU."
+    echo "[ERROR] TabM training requires the allocated GPU."
 fi
 
 if [[ "${GPU_READY}" -eq 1 ]]; then
@@ -199,7 +197,7 @@ if result != 0:
 PY
     then
         GPU_READY=0
-        echo "[FALLBACK] CUDA Driver API is unavailable; ResNet will use CPU."
+        echo "[ERROR] CUDA Driver API is unavailable for TabM."
     fi
 fi
 
@@ -235,15 +233,15 @@ print(f"[GPU-PROBE] PASS device={torch.cuda.get_device_name(0)}")
 PY
     then
         GPU_READY=0
-        echo "[FALLBACK] PyTorch CUDA probe failed; ResNet will use CPU."
+        echo "[ERROR] PyTorch CUDA probe failed for TabM."
     fi
 fi
 
-if [[ "${GPU_READY}" -eq 1 ]]; then
-    echo "[MODE] three_model_resnet_cuda"
-else
-    echo "[MODE] three_model_resnet_cpu"
+if [[ "${GPU_READY}" -ne 1 ]]; then
+    echo "[ERROR] No valid CUDA backend; no lower-quality submit.zip will be built."
+    exit 73
 fi
+echo "[MODE] two_model_catboost_tabm_residual_cuda"
 
 echo "[PREFLIGHT] Validating DACON submission requirements before training"
 (
@@ -319,28 +317,11 @@ echo "[STAGE] Local working directory: $(pwd)"
 TRAIN_ARGS=(
     "--clean"
     "--cat-task-type" "CPU"
-    "--xgb-device" "cpu"
+    "--nn-device" "cuda"
 )
-if [[ "${GPU_READY}" -eq 1 ]]; then
-    TRAIN_ARGS+=("--nn-device" "cuda")
-    echo "[TRAIN] XGBoost=CPU, CatBoost=CPU, ResNet=CUDA"
-else
-    TRAIN_ARGS+=("--nn-device" "cpu")
-    echo "[TRAIN] XGBoost=CPU, CatBoost=CPU, ResNet=CPU"
-fi
+echo "[TRAIN] CatBoost=CPU, TabM-residual=CUDA"
 echo "[TRAIN] command: python scripts/train_submit.py ${TRAIN_ARGS[*]}"
-if ! python scripts/train_submit.py "${TRAIN_ARGS[@]}"; then
-    echo "[FALLBACK] Three-model training failed."
-    echo "[FALLBACK] Restarting clean XGBoost+CatBoost CPU training in the same job."
-    TRAIN_ARGS=(
-        "--clean"
-        "--cat-task-type" "CPU"
-        "--xgb-device" "cpu"
-        "--disable-neural"
-    )
-    echo "[TRAIN] retry command: python scripts/train_submit.py ${TRAIN_ARGS[*]}"
-    python scripts/train_submit.py "${TRAIN_ARGS[@]}"
-fi
+python scripts/train_submit.py "${TRAIN_ARGS[@]}"
 
 echo "[BUILD] Building submit.zip"
 python scripts/build_submit.py
