@@ -407,10 +407,6 @@ class LeakageSafeFeatureEngineer:
             "pitcher_prior_strength": float(self.config.pitcher_prior_strength),
             "batter_prior_strength": float(self.config.batter_prior_strength),
             "cold_start_threshold": int(self.config.cold_start_threshold),
-            "residual_prior_strength": float(self.config.residual_prior_strength),
-            "residual_probability_clip": float(
-                self.config.residual_probability_clip
-            ),
             "trackman": (
                 None
                 if self.trackman_features is None
@@ -422,3 +418,38 @@ class LeakageSafeFeatureEngineer:
                 else self.main_history_features.export_state()
             ),
         }
+
+
+def validate_feature_config_contract(config: FeatureConfig) -> None:
+    """Fail fast when feature code and ``FeatureConfig`` are out of sync.
+
+    This intentionally builds only the small, empty runtime state.  It runs
+    before the multi-hundred-megabyte training/Trackman files are loaded, so a
+    partially applied strategy change cannot waste a scheduled GPU job.
+    """
+    state = LeakageSafeFeatureEngineer(config).export_runtime_state()
+    required = {
+        "feature_version",
+        "smoothing_prior",
+        "pitcher_prior_strength",
+        "batter_prior_strength",
+        "cold_start_threshold",
+        "trackman",
+        "main_history",
+    }
+    missing = sorted(required - set(state))
+    if missing:
+        raise RuntimeError(f"Feature runtime state is missing keys: {missing}")
+
+    rejected = sorted(
+        {"residual_prior_strength", "residual_probability_clip"} & set(state)
+    )
+    if rejected:
+        raise RuntimeError(
+            "Rejected TabM residual feature state is still present: "
+            f"{rejected}"
+        )
+    print(
+        f"[BACKEND] Feature config/state contract PASS "
+        f"(feature_version={state['feature_version']})"
+    )

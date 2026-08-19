@@ -15,6 +15,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from src.config import ExperimentConfig, ModelConfig, NeuralConfig
 from src.data import load_csv, validate_train_schema
+from src.features import validate_feature_config_contract
 from src.training import (
     build_feature_table,
     run_temporal_validation,
@@ -65,6 +66,7 @@ def main():
         ),
         neural=NeuralConfig(enabled=not args.disable_neural, device=args.nn_device),
     )
+    validate_feature_config_contract(config.features)
     validate_xgboost_backend(config.models)
     if config.neural.enabled:
         from src.neural import validate_neural_backend

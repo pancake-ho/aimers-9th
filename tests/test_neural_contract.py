@@ -38,9 +38,6 @@ class NeuralContractTests(unittest.TestCase):
                 "cat_b": np.asarray([0, 0, 1, 1, 2, 2, -1, 0], dtype=np.int32),
                 "num_a": np.linspace(-1.0, 1.0, 8, dtype=np.float32),
                 "num_b": np.asarray([1, 1, 2, 3, 5, 8, 13, 21], dtype=np.float32),
-                "hierarchical_success_logit": np.linspace(
-                    -0.4, 0.4, 8, dtype=np.float32
-                ),
             }
         )
         processor = NeuralPreprocessor(
@@ -56,11 +53,8 @@ class NeuralContractTests(unittest.TestCase):
         self.assertTrue((x_cat >= 0).all())
         self.assertEqual(int(x_cat[2, 0]), 0)
 
-    def test_all_models_round_trip_checkpoint(self):
+    def test_both_models_round_trip_checkpoint(self):
         config = NeuralConfig(
-            tabm_k=4,
-            tabm_d_block=16,
-            tabm_n_blocks=2,
             resnet_d_main=16,
             resnet_d_hidden=24,
             resnet_n_blocks=2,
@@ -69,7 +63,7 @@ class NeuralContractTests(unittest.TestCase):
             ft_n_layers=2,
             ft_d_ffn=16,
         )
-        for kind in ("tabm", "resnet", "ft_transformer"):
+        for kind in ("resnet", "ft_transformer"):
             spec = make_model_spec(kind, self.state, config)
             model = build_model(spec)
             model.eval()
@@ -81,16 +75,6 @@ class NeuralContractTests(unittest.TestCase):
                 actual = predict_model(restored, self.arrays, device="cpu", batch_size=4)
             self.assertEqual(actual.shape, (len(self.X),))
             np.testing.assert_allclose(actual, expected, rtol=1e-6, atol=1e-6)
-
-    def test_zero_initialized_tabm_starts_at_hierarchical_probability(self):
-        config = NeuralConfig(tabm_k=4, tabm_d_block=16, tabm_n_blocks=2)
-        spec = make_model_spec("tabm", self.state, config)
-        model = build_model(spec)
-        actual = predict_model(model, self.arrays, device="cpu", batch_size=4)
-        expected = 1.0 / (
-            1.0 + np.exp(-self.X["hierarchical_success_logit"].to_numpy())
-        )
-        np.testing.assert_allclose(actual, expected, rtol=1e-6, atol=1e-6)
 
 
 if __name__ == "__main__":
