@@ -26,6 +26,7 @@ from src.splits import make_abs_late_fold, make_temporal_folds, uniform_weights
 from src.tabfm.config import TabDPTExperimentConfig
 from src.tabfm.context import (
     select_recent_context_indices,
+    select_representative_context_indices,
     tabdpt_feature_names,
     to_tabdpt_array,
 )
@@ -51,6 +52,56 @@ def _print_metrics(label: str, metrics: Mapping[str, float]) -> None:
         f"bias={metrics['calibration_bias']:+.6f}"
     )
 
+
+def _select_tabdpt_context(
+    train: pd.DataFrame,
+    allowed_indices: np.ndarray,
+    *,
+    target_col: str,
+    config: TabDPTExperimentConfig,
+    seed: int,
+) -> np.ndarray:
+    if (
+        config.context_strategy
+        == "recent_proportional"
+    ):
+        return (
+            select_recent_context_indices(
+                train,
+                allowed_indices,
+                target_col=target_col,
+                context_size=config.context_size,
+                seed=seed,
+            )
+        )
+
+    if (
+        config.context_strategy
+        == "representative_v1"
+    ):
+        return (
+            select_representative_context_indices(
+                train,
+                allowed_indices,
+                target_col=target_col,
+                context_size=config.context_size,
+                seed=seed,
+                recent_fraction=(
+                    config.representative_recent_fraction
+                ),
+                pitcher_fraction=(
+                    config.representative_pitcher_fraction
+                ),
+                situation_fraction=(
+                    config.representative_situation_fraction
+                ),
+            )
+        )
+
+    raise ValueError(
+        "Unsupported context strategy: "
+        f"{config.context_strategy}"
+    )
 
 def _global_to_fold_positions(
     sorted_fold_indices: np.ndarray,
@@ -122,12 +173,18 @@ def run_tabdpt_temporal_validation(
         del xgb_model
         gc.collect()
 
-        context_global = select_recent_context_indices(
+        context_global = _select_tabdpt_context(
             train,
-            fold.train_idx,
+            np.asarray(
+                fold.train_idx,
+                dtype=np.int64,
+            ),
             target_col=target_col,
-            context_size=tabdpt_config.context_size,
-            seed=tabdpt_config.random_seed + 100 * fold_number,
+            config=tabdpt_config,
+            seed=(
+                tabdpt_config.random_seed
+                + 100 * fold_number
+            ),
         )
         context_positions = _global_to_fold_positions(fold.train_idx, context_global)
         feature_names = tabdpt_feature_names(
@@ -371,11 +428,14 @@ def train_and_save_tabdpt_candidate(
     feature_names = tabdpt_feature_names(
         preprocessor.num_cols_, max_features=tabdpt_config.max_features
     )
-    context_indices = select_recent_context_indices(
+    context_indices = _select_tabdpt_context(
         train,
-        np.arange(len(train), dtype=np.int64),
+        np.arange(
+            len(train),
+            dtype=np.int64,
+        ),
         target_col=target_col,
-        context_size=tabdpt_config.context_size,
+        config=tabdpt_config,
         seed=tabdpt_config.random_seed,
     )
     context_x = to_tabdpt_array(X.iloc[context_indices], feature_names)

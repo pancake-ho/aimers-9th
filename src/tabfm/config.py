@@ -37,6 +37,14 @@ class TabDPTExperimentConfig:
     non_tabdpt_runtime_reserve_seconds: float = 75.0
     maximum_estimated_runtime_seconds: float = 540.0
 
+    context_strategy: str = (
+    "representative_v1"
+    )
+
+    representative_recent_fraction: float = 0.70
+    representative_pitcher_fraction: float = 0.20
+    representative_situation_fraction: float = 0.10
+
     def validate(self) -> None:
         if self.context_size < 1_024:
             raise ValueError("TabDPT context_size must be at least 1,024.")
@@ -58,3 +66,25 @@ class TabDPTExperimentConfig:
             raise ValueError("Runtime reserve must be non-negative.")
         if not 0.0 < self.maximum_estimated_runtime_seconds < 600.0:
             raise ValueError("Runtime gate must stay below DACON's 600 seconds.")
+        if self.context_strategy not in {
+            "recent_proportional",
+            "representative_v1",
+        }:
+            raise ValueError(
+                "Unsupported TabDPT context strategy: "
+                f"{self.context_strategy}"
+            )
+
+        context_fractions = (
+            self.representative_recent_fraction
+            + self.representative_pitcher_fraction
+            + self.representative_situation_fraction
+        )
+
+        if not abs(
+            context_fractions - 1.0
+        ) <= 1e-9:
+            raise ValueError(
+                "Representative context fractions "
+                "must sum to one."
+            )
