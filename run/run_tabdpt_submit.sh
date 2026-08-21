@@ -4,7 +4,7 @@
 #SBATCH --cpus-per-gpu=16
 #SBATCH --mem-per-gpu=29G
 #SBATCH -p batch_eebme_ugrad
-#SBATCH --exclude=moana-y5
+#SBATCH --exclude=moana-y5,moana-u8
 #SBATCH -t 1-0
 #SBATCH -o /data/surt321/repos/aimers_9th/logs/slurm-%A.out
 
@@ -118,16 +118,96 @@ if not torch.cuda.is_available():
     )
 
 device = torch.device("cuda:0")
-x = torch.ones((128, 128), device=device)
-product = x @ x
-if not torch.isfinite(product).all():
-    raise RuntimeError("CUDA matrix multiplication produced non-finite values.")
 
-query = torch.randn((1, 4, 128, 64), device=device, dtype=torch.float16)
-with sdpa_kernel(SDPBackend.FLASH_ATTENTION):
-    attention = F.scaled_dot_product_attention(query, query, query)
-if not torch.isfinite(attention).all():
-    raise RuntimeError("Flash SDPA produced non-finite values.")
+gpu_name = torch.cuda.get_device_name(0)
+capability = torch.cuda.get_device_capability(0)
+major, minor = capability
+
+print(
+    f"[GPU] device={gpu_name}",
+    flush=True,
+)
+print(
+    f"[GPU] compute_capability=sm{major}{minor}",
+    flush=True,
+)
+
+x = torch.ones(
+    (128, 128),
+    device=device,
+)
+
+product = x @ x
+
+if not torch.isfinite(product).all():
+    raise RuntimeError(
+        "CUDA matrix multiplication "
+        "produced non-finite values."
+    )
+
+print(
+    "[GPU] CUDA matmul PASS",
+    flush=True,
+)
+
+# This experiment intentionally keeps the same Flash-Attention
+# inference path as the existing TabDPT temporal baseline.
+#
+# PyTorch's native Flash SDPA used by this environment requires
+# Ampere-or-newer CUDA GPUs (sm80+).  Running the representative
+# context experiment through a non-Flash path would change more
+# than the context-selection variable and weaken the ablation.
+if major < 8:
+    raise RuntimeError(
+        "This TabDPT temporal ablation requires an "
+        "Ampere-or-newer GPU (compute capability >= 8.0) "
+        "to preserve the validated Flash-Attention path. "
+        f"Allocated GPU: {gpu_name}, "
+        f"compute capability sm{major}{minor}."
+    )
+
+if not torch.backends.cuda.is_flash_attention_available():
+    raise RuntimeError(
+        "PyTorch reports that native Flash Attention "
+        "is unavailable on this CUDA build/GPU."
+    )
+
+query = torch.randn(
+    (1, 4, 128, 64),
+    device=device,
+    dtype=torch.float16,
+)
+
+with sdpa_kernel(
+    SDPBackend.FLASH_ATTENTION
+):
+    attention = (
+        F.scaled_dot_product_attention(
+            query,
+            query,
+            query,
+        )
+    )
+
+if not torch.isfinite(
+    attention
+).all():
+    raise RuntimeError(
+        "Flash SDPA produced "
+        "non-finite values."
+    )
+
+print(
+    "[GPU] Flash SDPA PASS",
+    flush=True,
+)
+
+del attention
+del product
+del query
+del x
+
+torch.cuda.empty_cache()
 
 print(f"[GPU] device={torch.cuda.get_device_name(0)}", flush=True)
 print("[GPU] CUDA matmul PASS", flush=True)
