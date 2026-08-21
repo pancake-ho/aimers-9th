@@ -21,6 +21,7 @@ ZIP_PATH = DIST_DIR / "submit.zip"
 
 CORE_MODEL_FILES = (
     "xgb_model.json",
+    "lgb_model.txt",
     "cat_model.cbm",
     "bundle.pkl",
     "manifest.json",
@@ -62,11 +63,26 @@ def _required_files() -> dict[str, Path]:
     with manifest_path.open("r", encoding="utf-8") as handle:
         manifest = json.load(handle)
     model_order = list(manifest.get("model_order", ()))
-    if model_order == ["xgb", "cat"]:
+    if model_order == [
+        "xgb",
+        "lgb",
+        "cat",
+    ]:
         return files
     supported_neural_orders = (
-        ["xgb", "cat", "resnet"],
-        ["xgb", "cat", "resnet", "ft_transformer"],
+        [
+            "xgb",
+            "lgb",
+            "cat",
+            "resnet",
+        ],
+        [
+            "xgb",
+            "lgb",
+            "cat",
+            "resnet",
+            "ft_transformer",
+        ],
     )
     if model_order not in supported_neural_orders:
         raise ValueError(f"Unsupported manifest model_order: {model_order}")

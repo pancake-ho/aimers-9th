@@ -11,7 +11,7 @@ import numpy as np
 import pandas as pd
 
 from src.calibration import (
-    fit_prequential_logit_calibrator,
+    fit_abs_regime_logit_calibrator,
     select_stable_weights,
 )
 from src.config import ExperimentConfig
@@ -25,6 +25,8 @@ from src.models import (
     GBDT_MODEL_ORDER,
     train_catboost_fold,
     train_catboost_full,
+    train_lightgbm_fold,
+    train_lightgbm_full,
     train_xgboost_fold,
     train_xgboost_full,
 )
@@ -50,14 +52,37 @@ def _active_neural_models(config: ExperimentConfig) -> tuple[str, ...]:
     return requested
 
 
-def _strategy_name(model_order: tuple[str, ...]) -> str:
+def _strategy_name(
+    model_order: tuple[str, ...]
+) -> str:
     if model_order == GBDT_MODEL_ORDER:
-        return "temporal_xgb_cat_logit_calibration_cpu_fallback_v2"
-    if model_order == (*GBDT_MODEL_ORDER, "resnet"):
-        return "temporal_xgb_cat_resnet_regime_v6"
-    if model_order == (*GBDT_MODEL_ORDER, "resnet", "ft_transformer"):
-        return "trackman_entity_gbdt_resnet_ftt_constrained_v8"
-    raise ValueError(f"Unsupported model order: {model_order}")
+        return (
+            "temporal_xgb_lgb_cat_"
+            "abs_calibration_v9"
+        )
+
+    if model_order == (
+        *GBDT_MODEL_ORDER,
+        "resnet",
+    ):
+        return (
+            "temporal_xgb_lgb_cat_"
+            "resnet_abs_calibration_v9"
+        )
+
+    if model_order == (
+        *GBDT_MODEL_ORDER,
+        "resnet",
+        "ft_transformer",
+    ):
+        return (
+            "temporal_xgb_lgb_cat_"
+            "resnet_ftt_abs_calibration_v9"
+        )
+
+    raise ValueError(
+        f"Unsupported model order: {model_order}"
+    )
 
 
 def _print_metrics(label: str, metrics: Mapping[str, float]) -> None:
@@ -206,6 +231,48 @@ def run_temporal_validation(
         del xgb_model
         gc.collect()
 
+        # --------------------------------------------------------
+        # LightGBM
+        # --------------------------------------------------------
+        start = time.perf_counter()
+
+        (
+            lgb_model,
+            predictions["lgb"],
+            best_iterations["lgb"],
+        ) = train_lightgbm_fold(
+            X_train,
+            y_train,
+            X_valid,
+            y_valid,
+            sample_weight,
+            preprocessor.categorical_indices,
+            config.models,
+        )
+
+        elapsed = (
+            time.perf_counter() - start
+        )
+
+        per_model_metrics["lgb"] = (
+            evaluate_probabilities(
+                y_valid,
+                predictions["lgb"],
+            )
+        )
+
+        per_model_metrics["lgb"][
+            "train_seconds"
+        ] = float(elapsed)
+
+        _print_metrics(
+            f"{fold.validation_label}/lgb",
+            per_model_metrics["lgb"],
+        )
+
+        del lgb_model
+        gc.collect()
+
         start = time.perf_counter()
         cat_model, predictions["cat"], best_iterations["cat"] = train_catboost_fold(
             X_train,
@@ -270,14 +337,36 @@ def run_temporal_validation(
             {
                 "name": fold.name,
                 "valid_season": fold.valid_season,
-                "validation_label": fold.validation_label,
+                "validation_label": (
+                    fold.validation_label
+                ),
                 "y_true": y_valid,
+                "valid_months": (
+                    pd.to_numeric(
+                        train.iloc[
+                            fold.valid_idx
+                        ]["game_month"],
+                        errors="raise",
+                    )
+                    .to_numpy(
+                        dtype=np.int8,
+                        copy=True,
+                    )
+                ),
                 "predictions": predictions,
-                "best_iterations": best_iterations,
+                "best_iterations": (
+                    best_iterations
+                ),
                 "metrics": per_model_metrics,
-                "entity_ablation": entity_ablation,
-                "n_train": int(len(fold.train_idx)),
-                "n_valid": int(len(fold.valid_idx)),
+                "entity_ablation": (
+                    entity_ablation
+                ),
+                "n_train": int(
+                    len(fold.train_idx)
+                ),
+                "n_valid": int(
+                    len(fold.valid_idx)
+                ),
             }
         )
 
@@ -294,11 +383,16 @@ def run_temporal_validation(
         protected_fold_labels=config.ensemble_protected_folds,
         non_degradation_tolerance=config.ensemble_non_degradation_tolerance,
     )
-    calibrator = fit_prequential_logit_calibrator(
-        earlier_fold=fold_results[0],
-        recent_fold=fold_results[1],
-        weights=weights,
-        model_order=model_order,
+    calibrator = (
+        fit_abs_regime_logit_calibrator(
+            full_2024_fold=fold_results[1],
+            late_2024_fold=fold_results[2],
+            weights=weights,
+            model_order=model_order,
+            early_month_max=(
+                config.abs_late_train_month_max
+            ),
+        )
     )
 
     fold_summaries = []
@@ -322,33 +416,82 @@ def run_temporal_validation(
             }
         )
 
-    recent = fold_results[1]
-    recent_ensemble = blend_predictions(
-        [recent["predictions"][name] for name in model_order], weights
-    )
-    transferred = apply_logit_intercept(
-        recent_ensemble, calibrator["earlier_intercept"]
-    )
-    transfer_metrics = evaluate_probabilities(recent["y_true"], transferred)
-    print(
-        f"[CALIBRATION] accepted={calibrator['accepted']} "
-        f"2024 raw={calibrator['recent_raw_brier']:.8f} "
-        f"2023-intercept transfer={calibrator['recent_transferred_brier']:.8f} "
-        f"final_intercept={calibrator['intercept']:+.6f}"
+    late_fold = fold_results[2]
+
+    late_ensemble = blend_predictions(
+        [
+            late_fold["predictions"][name]
+            for name in model_order
+        ],
+        weights,
     )
 
-    recent_iterations = fold_results[-1]["best_iterations"]
+    late_transferred = (
+        apply_logit_intercept(
+            late_ensemble,
+            calibrator["early_intercept"],
+        )
+    )
+
+    transfer_metrics = (
+        evaluate_probabilities(
+            late_fold["y_true"],
+            late_transferred,
+        )
+    )
+
+    print(
+        "[CALIBRATION] "
+        f"accepted={calibrator['accepted']} "
+        f"late_raw="
+        f"{calibrator['late_raw_brier']:.8f} "
+        f"early->late="
+        f"{calibrator['late_transferred_brier']:.8f} "
+        f"gain="
+        f"{calibrator['transfer_gain']:+.8f} "
+        f"final_intercept="
+        f"{calibrator['intercept']:+.6f}"
+    )
+
+    recent_iterations = (
+        fold_results[-1]["best_iterations"]
+    )
+
     final_iterations = {
         "xgb": int(
             min(
                 config.models.xgb_num_boost_round,
-                max(50, round(recent_iterations["xgb"] * 1.05)),
+                max(
+                    50,
+                    round(
+                        recent_iterations["xgb"]
+                        * 1.05
+                    ),
+                ),
+            )
+        ),
+        "lgb": int(
+            min(
+                config.models.lgb_num_boost_round,
+                max(
+                    50,
+                    round(
+                        recent_iterations["lgb"]
+                        * 1.05
+                    ),
+                ),
             )
         ),
         "cat": int(
             min(
                 config.models.cat_iterations,
-                max(50, round(recent_iterations["cat"] * 1.05)),
+                max(
+                    50,
+                    round(
+                        recent_iterations["cat"]
+                        * 1.05
+                    ),
+                ),
             )
         ),
     }
@@ -385,10 +528,8 @@ def run_temporal_validation(
     # Use the calibrated score only when the intercept was estimated on 2023
     # and improved 2024 without seeing 2024 labels. This is a genuine
     # one-season-forward result, not in-fold calibration.
-    anchor_2024 = (
-        anchor_2024_transferred
-        if calibrator["accepted"]
-        else anchor_2024_raw
+    anchor_2024 = float(
+        by_label["2024"]["ensemble"]["brier"]
     )
     late = by_label["2024_late_abs"]
     late_ensemble = float(late["ensemble"]["brier"])
@@ -407,18 +548,31 @@ def run_temporal_validation(
         else None
     )
     checks = {
-        "2023_guard": guard_2023 <= config.submission_gate_2023_max_brier,
-        "2024_target": anchor_2024 <= config.submission_gate_2024_max_brier,
+        "2023_guard": (
+            guard_2023
+            <= config.submission_gate_2023_max_brier
+        ),
+        "2024_target": (
+            anchor_2024
+            <= config.submission_gate_2024_max_brier
+        ),
         "late_abs_blend": (
-            late_blend_gain >= config.submission_gate_late_min_blend_gain
+            late_blend_gain
+            >= config.submission_gate_late_min_blend_gain
+        ),
+        "calibration_late_transfer": (
+            not calibrator["accepted"]
+            or calibrator["transfer_gain"] > 0.0
         ),
         "entity_2024_paired_ablation": (
             not entity_gate_required
-            or entity_2024_gain >= config.submission_gate_entity_2024_min_gain
+            or entity_2024_gain
+            >= config.submission_gate_entity_2024_min_gain
         ),
         "entity_late_paired_ablation": (
             not entity_gate_required
-            or entity_late_gain >= config.submission_gate_entity_late_min_gain
+            or entity_late_gain
+            >= config.submission_gate_entity_late_min_gain
         ),
     }
     report["submission_gate"] = {
@@ -480,6 +634,37 @@ def train_and_save_final_models(
     del xgb_model
     gc.collect()
 
+    lgb_rounds = int(
+        ensemble_state[
+            "final_iterations"
+        ]["lgb"]
+    )
+
+    print(
+        "[FINAL] Training LightGBM "
+        f"for {lgb_rounds} rounds..."
+    )
+
+    lgb_model = train_lightgbm_full(
+        X,
+        y,
+        sample_weight,
+        preprocessor.categorical_indices,
+        config.models,
+        num_boost_round=lgb_rounds,
+    )
+
+    lgb_path = (
+        model_dir / "lgb_model.txt"
+    )
+
+    lgb_model.save_model(
+        str(lgb_path)
+    )
+
+    del lgb_model
+    gc.collect()
+
     cat_iterations = int(ensemble_state["final_iterations"]["cat"])
     print(f"[FINAL] Training CatBoost for {cat_iterations} iterations...")
     cat_model = train_catboost_full(
@@ -538,7 +723,7 @@ def train_and_save_final_models(
 
     raw_feature_cols = [col for col in train.columns if col != target]
     bundle = {
-        "bundle_version": 6,
+        "bundle_version": 7,
         "id_col": config.features.id_col,
         "target_col": target,
         "expected_raw_columns": raw_feature_cols,
@@ -558,7 +743,7 @@ def train_and_save_final_models(
 
     manifest = {
         "strategy": _strategy_name(tuple(ensemble_state["model_order"])),
-        "bundle_version": 6,
+        "bundle_version": 7,
         "model_order": list(ensemble_state["model_order"]),
         "weights": list(ensemble_state["weights"]),
         "calibration": dict(ensemble_state["calibration"]),
@@ -566,8 +751,12 @@ def train_and_save_final_models(
         "n_features": int(len(preprocessor.feature_names_)),
         "model_files": [
             xgb_path.name,
+            lgb_path.name,
             cat_path.name,
-            *[neural_paths[name].name for name in neural_model_order],
+            *[
+                neural_paths[name].name
+                for name in neural_model_order
+            ],
             bundle_path.name,
         ],
     }

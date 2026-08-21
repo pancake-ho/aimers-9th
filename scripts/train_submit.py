@@ -21,7 +21,10 @@ from src.training import (
     run_temporal_validation,
     train_and_save_final_models,
 )
-from src.models import validate_xgboost_backend
+from src.models import (
+    validate_lightgbm_backend,
+    validate_xgboost_backend,
+)
 
 
 def parse_args():
@@ -67,6 +70,7 @@ def main():
         neural=NeuralConfig(enabled=not args.disable_neural, device=args.nn_device),
     )
     validate_feature_config_contract(config.features)
+    validate_lightgbm_backend(config.models)
     validate_xgboost_backend(config.models)
     if config.neural.enabled:
         from src.neural import validate_neural_backend

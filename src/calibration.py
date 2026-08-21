@@ -265,3 +265,156 @@ def fit_prequential_logit_calibrator(
         "recent_transferred_brier": float(transferred_brier),
         "transfer_gain": float(recent_raw_brier - transferred_brier),
     }
+
+def fit_abs_regime_logit_calibrator(
+    full_2024_fold: Mapping[str, object],
+    late_2024_fold: Mapping[str, object],
+    weights: Sequence[float],
+    model_order: Sequence[str] = MODEL_ORDER,
+    early_month_max: int = 6,
+    min_gain: float = 1e-7,
+) -> Dict[str, object]:
+    """
+    ABS-regime calibration validation.
+
+    1) A model trained through 2023 predicts all 2024 rows.
+    2) Jan-Jun 2024 predictions/labels estimate an intercept.
+    3) That frozen intercept is applied to Jul-Sep predictions from the
+       independent late-2024 temporal fold.
+    4) Only if the forward transfer improves Brier do we accept calibration.
+    5) For final 2025 inference, the intercept is refit on all 2024 holdout
+       predictions.
+
+    No test-row statistic is used.
+    """
+
+    full_prediction = blend_predictions(
+        [
+            full_2024_fold["predictions"][name]
+            for name in model_order
+        ],
+        weights,
+    )
+
+    late_prediction = blend_predictions(
+        [
+            late_2024_fold["predictions"][name]
+            for name in model_order
+        ],
+        weights,
+    )
+
+    full_y = np.asarray(
+        full_2024_fold["y_true"],
+        dtype=np.float64,
+    )
+    late_y = np.asarray(
+        late_2024_fold["y_true"],
+        dtype=np.float64,
+    )
+
+    months = np.asarray(
+        full_2024_fold["valid_months"],
+        dtype=np.int64,
+    )
+
+    if months.shape != full_y.shape:
+        raise ValueError(
+            "2024 validation month vector does not match targets."
+        )
+
+    early_mask = months <= int(early_month_max)
+
+    if early_mask.sum() < 1000:
+        raise ValueError(
+            "Not enough early-2024 rows for calibration transfer."
+        )
+
+    early_y = full_y[early_mask]
+    early_prediction = full_prediction[early_mask]
+
+    early_intercept = _best_brier_logit_intercept(
+        early_y,
+        early_prediction,
+    )
+
+    full_intercept = _best_brier_logit_intercept(
+        full_y,
+        full_prediction,
+    )
+
+    late_raw_brier = brier_score(
+        late_y,
+        late_prediction,
+    )
+
+    late_transferred_prediction = (
+        apply_logit_intercept(
+            late_prediction,
+            early_intercept,
+        )
+    )
+
+    late_transferred_brier = brier_score(
+        late_y,
+        late_transferred_prediction,
+    )
+
+    full_raw_brier = brier_score(
+        full_y,
+        full_prediction,
+    )
+
+    full_refit_brier = brier_score(
+        full_y,
+        apply_logit_intercept(
+            full_prediction,
+            full_intercept,
+        ),
+    )
+
+    same_direction = (
+        early_intercept == 0.0
+        or full_intercept == 0.0
+        or np.sign(early_intercept)
+        == np.sign(full_intercept)
+    )
+
+    accepted = bool(
+        same_direction
+        and late_transferred_brier
+        <= late_raw_brier - float(min_gain)
+    )
+
+    return {
+        "method": "abs_regime_logit_intercept",
+        "accepted": accepted,
+        "intercept": float(
+            full_intercept if accepted else 0.0
+        ),
+        "early_intercept": float(
+            early_intercept
+        ),
+        "full_2024_intercept": float(
+            full_intercept
+        ),
+        "early_rows": int(
+            early_mask.sum()
+        ),
+        "full_2024_raw_brier": float(
+            full_raw_brier
+        ),
+        "full_2024_refit_brier": float(
+            full_refit_brier
+        ),
+        "late_raw_brier": float(
+            late_raw_brier
+        ),
+        "late_transferred_brier": float(
+            late_transferred_brier
+        ),
+        "transfer_gain": float(
+            late_raw_brier
+            - late_transferred_brier
+        ),
+    }

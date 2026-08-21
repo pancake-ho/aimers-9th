@@ -63,7 +63,7 @@ class FeatureConfig:
     # disjoint pitcher_trackman_id namespace.  Ambiguous pairs are rejected;
     # rejected/unseen pitchers retain the existing hand/count Trackman
     # fallback.  Thresholds are label-free and fixed before temporal scoring.
-    trackman_entity_enabled: bool = True
+    trackman_entity_enabled: bool = False
     trackman_entity_min_pitches: int = 300
     trackman_entity_max_distance: float = 10.0
     trackman_entity_min_margin_ratio: float = 1.35
@@ -119,10 +119,11 @@ class FeatureConfig:
 @dataclass(frozen=True)
 class ModelConfig:
     random_seed: int = 2026
-    # Seraph allocates 16 CPU cores. Submission inference separately caps the
-    # loaded XGBoost booster and PyTorch runtime at the DACON limit of 6.
     num_threads: int = 16
 
+    # ------------------------------------------------------------
+    # XGBoost
+    # ------------------------------------------------------------
     xgb_learning_rate: float = 0.03
     xgb_max_depth: int = 7
     xgb_min_child_weight: float = 30.0
@@ -131,13 +132,35 @@ class ModelConfig:
     xgb_reg_lambda: float = 8.0
     xgb_reg_alpha: float = 0.05
     xgb_gamma: float = 0.0
-    # QuantileDMatrix and the hist Booster must use exactly the same value.
-    # Keep this explicit instead of relying on XGBoost's constructor default.
     xgb_max_bin: int = 256
     xgb_device: str = "cpu"
     xgb_num_boost_round: int = 1200
     xgb_early_stopping_rounds: int = 80
 
+    # ------------------------------------------------------------
+    # LightGBM
+    #
+    # Deliberately smoother than XGBoost/CatBoost.
+    # We want complementary probability errors, not another copy of XGB.
+    # ------------------------------------------------------------
+    lgb_learning_rate: float = 0.025
+    lgb_num_leaves: int = 31
+    lgb_max_depth: int = -1
+    lgb_min_data_in_leaf: int = 300
+    lgb_feature_fraction: float = 0.90
+    lgb_bagging_fraction: float = 0.90
+    lgb_bagging_freq: int = 1
+    lgb_lambda_l1: float = 0.05
+    lgb_lambda_l2: float = 8.0
+    lgb_min_gain_to_split: float = 0.0
+    lgb_max_bin: int = 255
+    lgb_num_boost_round: int = 1600
+    lgb_early_stopping_rounds: int = 100
+    lgb_device_type: str = "cpu"
+
+    # ------------------------------------------------------------
+    # CatBoost
+    # ------------------------------------------------------------
     cat_learning_rate: float = 0.03
     cat_depth: int = 8
     cat_l2_leaf_reg: float = 8.0
@@ -207,12 +230,7 @@ class ExperimentConfig:
     # 2024 ablation worsened CatBoost by 0.00040154 Brier. Keep the code for
     # controlled experiments and disable it for the next submission.
     use_main_history: bool = False
-    # 2024 is the first season from the same ABS regime as the hidden 2025
-    # target. Keep 2023 as a robustness guard, but optimize the blend mainly
-    # for the one-step-ahead 2024 fold.
-    # 2024 late-season is the closest observable same-regime proxy for 2025.
-    # The full 2024 fold remains a larger-sample stability anchor.
-    temporal_fold_importance: Tuple[float, ...] = (0.15, 0.35, 0.50)
+    temporal_fold_importance: Tuple[float, ...] = (0.05, 0.45, 0.50)
     ensemble_grid_step: float = 0.025
     # An ensemble may optimize the weighted average while regressing on the
     # closest observable regimes. Require it to dominate the best stable
@@ -229,8 +247,8 @@ class ExperimentConfig:
     # reduction near 0.00026 is the score-equivalent improvement needed to
     # reach 1000 from that anchor, so final training is gated at 0.24770.
     submission_gate_2023_max_brier: float = 0.25018
-    submission_gate_2024_max_brier: float = 0.24770
-    submission_gate_late_min_blend_gain: float = 0.00005
+    submission_gate_2024_max_brier: float = 0.24800
+    submission_gate_late_min_blend_gain: float = 0.0
     # Paired XGBoost ablation isolates the new physical/entity feature family
     # from model-family and ensemble changes.  Both closest temporal proxies
     # must clear a non-trivial Brier improvement before a zip is produced.

@@ -5,27 +5,33 @@ from typing import Sequence
 
 import numpy as np
 import pandas as pd
-try:  # Legacy ablation backend; not required by the submitted runtime.
+
+try:
     import xgboost as xgb
-except ImportError:  # pragma: no cover - exercised in lightweight test images
+except ImportError:
     xgb = None
 
 try:
+    import lightgbm as lgb
+except ImportError:
+    lgb = None
+
+try:
     from catboost import CatBoostClassifier
-except ImportError:  # pragma: no cover - exercised in lightweight test images
+except ImportError:
     CatBoostClassifier = None
 
 from src.config import ModelConfig
 
 
-# Two complementary boosted-tree implementations anchor the ensemble. CatBoost
-# consumes the categorical columns natively; XGBoost adds a strong numerical
-# histogram learner whose errors were usefully different in the team's best
-# leaderboard pipeline.
-GBDT_MODEL_ORDER = ("xgb", "cat")
+GBDT_MODEL_ORDER = ("xgb", "lgb", "cat")
 RESNET_MODEL_ORDER = (*GBDT_MODEL_ORDER, "resnet")
 MODEL_ORDER = (*GBDT_MODEL_ORDER, "resnet", "ft_transformer")
 
+
+# ============================================================
+# XGBoost
+# ============================================================
 
 def _xgb_brier_metric(prediction, dmatrix):
     target = dmatrix.get_label()
@@ -62,14 +68,9 @@ def _quantile_dmatrix(
     weight=None,
     ref=None,
 ):
-    """Construct every quantized matrix with the Booster's bin contract.
-
-    XGBoost stores the quantization cut structure in QuantileDMatrix. Its
-    max_bin must match the hist Booster parameter, including validation
-    matrices constructed with a training reference.
-    """
     if xgb is None:
-        raise ImportError("xgboost is required for the submitted GBDT ensemble.")
+        raise ImportError("xgboost is required.")
+
     return xgb.QuantileDMatrix(
         X,
         label=label,
@@ -82,38 +83,63 @@ def _quantile_dmatrix(
 
 
 def validate_xgboost_backend(config: ModelConfig) -> None:
-    """Fail fast on an incompatible XGBoost matrix/Booster contract.
-
-    This one-round check runs before the 1.47M-row feature build. It exercises
-    the same QuantileDMatrix + hist path used by temporal and final training.
-    """
     if xgb is None:
         raise ImportError("xgboost is not installed.")
-    if int(config.xgb_max_bin) < 2:
-        raise ValueError(f"xgb_max_bin must be >= 2; got {config.xgb_max_bin}")
-    if config.xgb_device.lower() not in {"cpu", "cuda"}:
-        raise ValueError(f"xgb_device must be cpu or cuda; got {config.xgb_device}")
 
     X_probe = pd.DataFrame(
         {
-            "probe_a": np.asarray([0, 1, 2, 3, 4, 5, 6, 7], dtype=np.float32),
-            "probe_b": np.asarray([1, 1, 0, 0, 1, 1, 0, 0], dtype=np.float32),
+            "probe_a": np.asarray(
+                [0, 1, 2, 3, 4, 5, 6, 7],
+                dtype=np.float32,
+            ),
+            "probe_b": np.asarray(
+                [1, 1, 0, 0, 1, 1, 0, 0],
+                dtype=np.float32,
+            ),
         }
     )
-    y_probe = np.asarray([0, 0, 0, 1, 0, 1, 1, 1], dtype=np.float32)
-    dprobe = _quantile_dmatrix(X_probe, config, label=y_probe)
-    params = _xgb_params(config)
-    params.update({"verbosity": 0, "min_child_weight": 1.0})
-    probe_model = xgb.train(params=params, dtrain=dprobe, num_boost_round=1)
-    prediction = np.asarray(probe_model.predict(dprobe), dtype=np.float64)
-    if prediction.shape != y_probe.shape or not np.isfinite(prediction).all():
-        raise RuntimeError("XGBoost backend preflight returned invalid predictions.")
-    print(
-        f"[BACKEND] XGBoost {xgb.__version__} preflight PASS "
-        f"(device={config.xgb_device.lower()}, "
-        f"QuantileDMatrix/hist max_bin={config.xgb_max_bin})"
+    y_probe = np.asarray(
+        [0, 0, 0, 1, 0, 1, 1, 1],
+        dtype=np.float32,
     )
-    del probe_model, dprobe, X_probe, y_probe, prediction
+
+    dprobe = _quantile_dmatrix(
+        X_probe,
+        config,
+        label=y_probe,
+    )
+
+    params = _xgb_params(config)
+    params.update(
+        {
+            "verbosity": 0,
+            "min_child_weight": 1.0,
+        }
+    )
+
+    model = xgb.train(
+        params=params,
+        dtrain=dprobe,
+        num_boost_round=1,
+    )
+
+    pred = np.asarray(
+        model.predict(dprobe),
+        dtype=np.float64,
+    )
+
+    if pred.shape != y_probe.shape:
+        raise RuntimeError("Invalid XGBoost prediction shape.")
+
+    if not np.isfinite(pred).all():
+        raise RuntimeError("XGBoost produced non-finite prediction.")
+
+    print(
+        f"[BACKEND] XGBoost {xgb.__version__} PASS "
+        f"(device={config.xgb_device}, max_bin={config.xgb_max_bin})"
+    )
+
+    del model, dprobe, X_probe, y_probe, pred
     gc.collect()
 
 
@@ -131,12 +157,14 @@ def train_xgboost_fold(
         label=y_train,
         weight=sample_weight,
     )
+
     dvalid = _quantile_dmatrix(
         X_valid,
         config,
         label=y_valid,
         ref=dtrain,
     )
+
     model = xgb.train(
         params=_xgb_params(config),
         dtrain=dtrain,
@@ -147,15 +175,26 @@ def train_xgboost_fold(
         early_stopping_rounds=config.xgb_early_stopping_rounds,
         verbose_eval=50,
     )
+
     best_iteration = (
         int(model.best_iteration)
         if model.best_iteration is not None
         else config.xgb_num_boost_round - 1
     )
-    prediction = model.predict(dvalid, iteration_range=(0, best_iteration + 1))
+
+    prediction = model.predict(
+        dvalid,
+        iteration_range=(0, best_iteration + 1),
+    )
+
     del dtrain, dvalid
     gc.collect()
-    return model, np.asarray(prediction, dtype=np.float64), best_iteration + 1
+
+    return (
+        model,
+        np.asarray(prediction, dtype=np.float64),
+        best_iteration + 1,
+    )
 
 
 def train_xgboost_full(
@@ -171,20 +210,228 @@ def train_xgboost_full(
         label=y_train,
         weight=sample_weight,
     )
+
     model = xgb.train(
         params=_xgb_params(config),
         dtrain=dtrain,
         num_boost_round=int(num_boost_round),
         verbose_eval=50,
     )
+
     del dtrain
     gc.collect()
+
     return model
 
 
-def _catboost_params(config: ModelConfig, iterations: int | None = None) -> dict:
-    params = {
-        "iterations": int(iterations or config.cat_iterations),
+# ============================================================
+# LightGBM
+# ============================================================
+
+def _lgb_brier_metric(prediction, dataset):
+    target = dataset.get_label()
+    prediction = np.asarray(prediction, dtype=np.float64)
+    target = np.asarray(target, dtype=np.float64)
+
+    score = np.mean((prediction - target) ** 2)
+
+    return "brier", float(score), False
+
+
+def _lgb_params(config: ModelConfig) -> dict:
+    return {
+        "objective": "binary",
+        "metric": "None",
+        "learning_rate": float(config.lgb_learning_rate),
+        "num_leaves": int(config.lgb_num_leaves),
+        "max_depth": int(config.lgb_max_depth),
+        "min_data_in_leaf": int(config.lgb_min_data_in_leaf),
+        "feature_fraction": float(config.lgb_feature_fraction),
+        "bagging_fraction": float(config.lgb_bagging_fraction),
+        "bagging_freq": int(config.lgb_bagging_freq),
+        "lambda_l1": float(config.lgb_lambda_l1),
+        "lambda_l2": float(config.lgb_lambda_l2),
+        "min_gain_to_split": float(config.lgb_min_gain_to_split),
+        "max_bin": int(config.lgb_max_bin),
+        "device_type": str(config.lgb_device_type),
+        "seed": int(config.random_seed),
+        "feature_fraction_seed": int(config.random_seed + 1),
+        "bagging_seed": int(config.random_seed + 2),
+        "data_random_seed": int(config.random_seed + 3),
+        "num_threads": int(config.num_threads),
+        "verbosity": -1,
+        "deterministic": True,
+        "force_col_wise": True,
+    }
+
+
+def validate_lightgbm_backend(config: ModelConfig) -> None:
+    if lgb is None:
+        raise ImportError("lightgbm is not installed.")
+
+    X_probe = pd.DataFrame(
+        {
+            "probe_a": np.asarray(
+                [0, 1, 2, 3, 4, 5, 6, 7],
+                dtype=np.float32,
+            ),
+            "probe_b": np.asarray(
+                [1, 1, 0, 0, 1, 1, 0, 0],
+                dtype=np.float32,
+            ),
+        }
+    )
+    y_probe = np.asarray(
+        [0, 0, 0, 1, 0, 1, 1, 1],
+        dtype=np.float32,
+    )
+
+    dataset = lgb.Dataset(
+        X_probe,
+        label=y_probe,
+        free_raw_data=False,
+    )
+
+    params = _lgb_params(config)
+    params["min_data_in_leaf"] = 1
+
+    model = lgb.train(
+        params=params,
+        train_set=dataset,
+        num_boost_round=2,
+    )
+
+    prediction = np.asarray(
+        model.predict(X_probe),
+        dtype=np.float64,
+    )
+
+    if prediction.shape != y_probe.shape:
+        raise RuntimeError("Invalid LightGBM prediction shape.")
+
+    if not np.isfinite(prediction).all():
+        raise RuntimeError("LightGBM produced non-finite prediction.")
+
+    print(
+        f"[BACKEND] LightGBM {lgb.__version__} PASS "
+        f"(device={config.lgb_device_type})"
+    )
+
+    del model, dataset, X_probe, y_probe, prediction
+    gc.collect()
+
+
+def train_lightgbm_fold(
+    X_train: pd.DataFrame,
+    y_train: np.ndarray,
+    X_valid: pd.DataFrame,
+    y_valid: np.ndarray,
+    sample_weight: np.ndarray,
+    categorical_indices: Sequence[int],
+    config: ModelConfig,
+):
+    if lgb is None:
+        raise ImportError("lightgbm is not installed.")
+
+    categorical_indices = list(categorical_indices)
+
+    dtrain = lgb.Dataset(
+        X_train,
+        label=y_train,
+        weight=sample_weight,
+        categorical_feature=categorical_indices,
+        free_raw_data=False,
+    )
+
+    dvalid = lgb.Dataset(
+        X_valid,
+        label=y_valid,
+        reference=dtrain,
+        categorical_feature=categorical_indices,
+        free_raw_data=False,
+    )
+
+    model = lgb.train(
+        params=_lgb_params(config),
+        train_set=dtrain,
+        num_boost_round=int(config.lgb_num_boost_round),
+        valid_sets=[dvalid],
+        valid_names=["valid"],
+        feval=_lgb_brier_metric,
+        callbacks=[
+            lgb.early_stopping(
+                stopping_rounds=int(
+                    config.lgb_early_stopping_rounds
+                ),
+                first_metric_only=True,
+                verbose=False,
+            ),
+            lgb.log_evaluation(period=50),
+        ],
+    )
+
+    best_iteration = int(model.best_iteration)
+
+    if best_iteration <= 0:
+        best_iteration = int(config.lgb_num_boost_round)
+
+    prediction = np.asarray(
+        model.predict(
+            X_valid,
+            num_iteration=best_iteration,
+        ),
+        dtype=np.float64,
+    )
+
+    del dtrain, dvalid
+    gc.collect()
+
+    return model, prediction, best_iteration
+
+
+def train_lightgbm_full(
+    X_train: pd.DataFrame,
+    y_train: np.ndarray,
+    sample_weight: np.ndarray,
+    categorical_indices: Sequence[int],
+    config: ModelConfig,
+    num_boost_round: int,
+):
+    if lgb is None:
+        raise ImportError("lightgbm is not installed.")
+
+    dataset = lgb.Dataset(
+        X_train,
+        label=y_train,
+        weight=sample_weight,
+        categorical_feature=list(categorical_indices),
+        free_raw_data=False,
+    )
+
+    model = lgb.train(
+        params=_lgb_params(config),
+        train_set=dataset,
+        num_boost_round=int(num_boost_round),
+    )
+
+    del dataset
+    gc.collect()
+
+    return model
+
+
+# ============================================================
+# CatBoost
+# ============================================================
+
+def _catboost_params(
+    config: ModelConfig,
+    iterations: int | None = None,
+) -> dict:
+    return {
+        "iterations": int(
+            iterations or config.cat_iterations
+        ),
         "learning_rate": config.cat_learning_rate,
         "depth": config.cat_depth,
         "loss_function": "Logloss",
@@ -199,7 +446,6 @@ def _catboost_params(config: ModelConfig, iterations: int | None = None) -> dict
         "thread_count": config.num_threads,
         "task_type": config.cat_task_type.upper(),
     }
-    return params
 
 
 def train_catboost_fold(
@@ -213,21 +459,39 @@ def train_catboost_fold(
 ):
     if CatBoostClassifier is None:
         raise ImportError("catboost is not installed.")
-    model = CatBoostClassifier(**_catboost_params(config))
+
+    model = CatBoostClassifier(
+        **_catboost_params(config)
+    )
+
     model.fit(
         X_train,
         y_train,
         cat_features=list(categorical_indices),
         sample_weight=sample_weight,
         eval_set=(X_valid, y_valid),
-        early_stopping_rounds=config.cat_early_stopping_rounds,
+        early_stopping_rounds=(
+            config.cat_early_stopping_rounds
+        ),
         use_best_model=True,
     )
+
     best_iteration = int(model.get_best_iteration())
+
     if best_iteration < 0:
-        best_iteration = config.cat_iterations - 1
-    prediction = model.predict_proba(X_valid)[:, 1]
-    return model, np.asarray(prediction, dtype=np.float64), best_iteration + 1
+        best_iteration = (
+            config.cat_iterations - 1
+        )
+
+    prediction = model.predict_proba(
+        X_valid
+    )[:, 1]
+
+    return (
+        model,
+        np.asarray(prediction, dtype=np.float64),
+        best_iteration + 1,
+    )
 
 
 def train_catboost_full(
@@ -240,11 +504,19 @@ def train_catboost_full(
 ):
     if CatBoostClassifier is None:
         raise ImportError("catboost is not installed.")
-    model = CatBoostClassifier(**_catboost_params(config, iterations=iterations))
+
+    model = CatBoostClassifier(
+        **_catboost_params(
+            config,
+            iterations=iterations,
+        )
+    )
+
     model.fit(
         X_train,
         y_train,
         cat_features=list(categorical_indices),
         sample_weight=sample_weight,
     )
+
     return model

@@ -110,6 +110,7 @@ import numpy
 import pandas
 import torch
 import xgboost
+import lightgbm
 
 print(f"[ENV] numpy={numpy.__version__}")
 print(f"[ENV] pandas={pandas.__version__}")
@@ -117,6 +118,10 @@ print(f"[ENV] catboost={catboost.__version__}")
 print(f"[ENV] xgboost={xgboost.__version__}")
 print(f"[ENV] torch={torch.__version__}")
 print(f"[ENV] torch_cuda_build={torch.version.cuda}")
+print(
+    f"[ENV] lightgbm="
+    f"{lightgbm.__version__}"
+)
 
 torch_base_version = torch.__version__.split("+", 1)[0]
 if torch_base_version != "2.5.1" or torch.version.cuda != "12.1":
@@ -255,7 +260,7 @@ if [[ "${GPU_READY}" -ne 1 ]]; then
     echo "[ERROR] No valid CUDA backend; no lower-quality submit.zip will be built."
     exit 73
 fi
-echo "[MODE] xgboost_catboost_resnet_fttransformer_constrained + trackman_entity_v8"
+echo "[MODE] xgb+lgb+cat+resnet+ft_transformer temporal_v9"
 
 echo "[PREFLIGHT] Validating DACON submission requirements before training"
 (
@@ -346,7 +351,7 @@ TRAIN_ARGS=(
     "--xgb-device" "cuda"
     "--nn-device" "cuda"
 )
-echo "[TRAIN] XGBoost=CUDA, CatBoost=GPU, ResNet/FT-Transformer=CUDA"
+echo "[TRAIN] XGBoost=CUDA, LightGBM=CPU, CatBoost=GPU, ResNet/FT-Transformer=CUDA"
 echo "[TRAIN] command: python scripts/train_submit.py ${TRAIN_ARGS[*]}"
 python scripts/train_submit.py "${TRAIN_ARGS[@]}"
 
