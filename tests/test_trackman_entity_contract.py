@@ -111,8 +111,22 @@ def _trackman_rows(include_future: bool = False) -> pd.DataFrame:
 
 
 def _test_config() -> FeatureConfig:
+    """
+    Explicitly enable Trackman entity resolution for entity-specific tests.
+
+    Production submission currently keeps trackman_entity_enabled=False
+    because this feature family has not yet demonstrated sufficient
+    temporal Brier gain. These tests exercise the dormant implementation
+    itself, so the feature must be enabled only inside this fixture.
+    """
     return replace(
         FeatureConfig(),
+
+        # IMPORTANT:
+        # production default is intentionally False.
+        # Enable only for this entity-resolution contract test.
+        trackman_entity_enabled=True,
+
         trackman_entity_min_pitches=5,
         trackman_entity_max_distance=100.0,
         trackman_entity_min_margin_ratio=1.01,
@@ -120,11 +134,13 @@ def _test_config() -> FeatureConfig:
         trackman_entity_min_count_ratio=0.2,
         trackman_entity_max_count_ratio=5.0,
         trackman_entity_team_min_support=1,
+
+        # Synthetic unit-test data contains only two pitchers,
+        # therefore production quality-gate thresholds must be relaxed.
         trackman_entity_min_matched_pitchers=1,
         trackman_entity_min_row_coverage=0.0,
         trackman_entity_min_team_mappings=0,
     )
-
 
 class TrackmanEntityContractTests(unittest.TestCase):
     def _build(self, include_future: bool):
