@@ -96,7 +96,40 @@ def build_feature_table(
     )
     state = engineer.export_runtime_state()
     print("[FEATURE] Building row-wise main-table features...")
-    features = engineer.transform(train)
+    features = engineer.transform(
+        train
+    )
+
+    if not features.columns.is_unique:
+        duplicated = (
+            features.columns[
+                features.columns.duplicated(
+                    keep=False
+                )
+            ]
+            .tolist()
+        )
+
+        counts = {
+            name: duplicated.count(name)
+            for name in sorted(
+                set(duplicated)
+            )
+        }
+
+        raise RuntimeError(
+            "Feature engineer produced "
+            "duplicate columns: "
+            f"{counts}"
+        )
+
+    print(
+        "[FEATURE] table_shape="
+        f"{features.shape} "
+        "unique_columns="
+        f"{features.columns.nunique()}"
+    )
+
     return features, state
 
 

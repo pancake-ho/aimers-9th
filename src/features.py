@@ -275,10 +275,19 @@ class StrictPastTrackmanFeatures:
                 int(pd.to_numeric(main_train["season"], errors="raise").max()) + 1,
             )
         )
-        hand_lookup: Dict[tuple, Dict[str, float]] = {}
-        count_lookup: Dict[tuple, Dict[str, float]] = {}
+        hand_lookup: Dict[
+            tuple,
+            Dict[str, float],
+        ] = {}
+
+        count_lookup: Dict[
+            tuple,
+            Dict[str, float],
+        ] = {}
+
         hand_names: list[str] = []
-        count_names: list[str] = []
+
+        hand_count_names: list[str] = []
 
         for target_season in range(min_season, max_target_season + 1):
             past = tm.loc[tm["season"] < target_season]
@@ -293,15 +302,17 @@ class StrictPastTrackmanFeatures:
             for key, values in per_hand.items():
                 hand_lookup[(target_season, *key)] = values
 
-            per_count, count_names = _summarize_profile(
-                past,
-                group_cols=(
-                    "pitcher_hand",
-                    "batter_hand",
-                    "balls_before",
-                    "strikes_before",
-                ),
-                prefix="tm_count",
+            per_count, hand_count_names = (
+                _summarize_profile(
+                    past,
+                    group_cols=(
+                        "pitcher_hand",
+                        "batter_hand",
+                        "balls_before",
+                        "strikes_before",
+                    ),
+                    prefix="tm_count",
+                )
             )
             for key, values in per_count.items():
                 count_lookup[(target_season, *key)] = values
@@ -345,9 +356,15 @@ class StrictPastTrackmanFeatures:
                 "tm_entity_log_n",
                 "tm_entity_available",
             ]
-            count_names = [
-                *(f"tm_entity_count_{metric}_mean" for metric in TRACKMAN_METRICS),
-                *(f"tm_entity_count_{group}_share" for group in PITCH_GROUPS),
+            entity_count_names = [
+                *(
+                    f"tm_entity_count_{metric}_mean"
+                    for metric in TRACKMAN_METRICS
+                ),
+                *(
+                    f"tm_entity_count_{group}_share"
+                    for group in PITCH_GROUPS
+                ),
                 "tm_entity_count_log_n",
                 "tm_entity_count_available",
             ]
@@ -368,12 +385,22 @@ class StrictPastTrackmanFeatures:
                 ),
                 "tm_entity_arsenal_available_pairs",
             ]
-            entity_profiles: Dict[str, Dict[str, object]] = {
-                "mapping": _empty_profile(mapping_names),
-                "pitcher": _empty_profile(pitcher_names),
-                "count": _empty_profile(count_names),
-                "recent": _empty_profile(recent_names),
-                "arsenal": _empty_profile(arsenal_names),
+            entity_profiles = {
+                "mapping": _empty_profile(
+                    mapping_names
+                ),
+                "pitcher": _empty_profile(
+                    pitcher_names
+                ),
+                "count": _empty_profile(
+                    entity_count_names
+                ),
+                "recent": _empty_profile(
+                    recent_names
+                ),
+                "arsenal": _empty_profile(
+                    arsenal_names
+                ),
             }
             audits: Dict[int, Dict[str, object]] = {}
             previous_top1: Dict[int, int] = {}
@@ -461,12 +488,12 @@ class StrictPastTrackmanFeatures:
             "profiles": {
                 "hand": {
                     "lookup": hand_lookup,
-                    "feature_names": hand_names,
+                    "count_feature_names": hand_count_names,
                     "defaults": {name: 0.0 for name in hand_names},
                 },
                 "hand_count": {
                     "lookup": count_lookup,
-                    "feature_names": count_names,
+                    "feature_names": entity_count_names,
                     "defaults": {name: 0.0 for name in count_names},
                 },
             },

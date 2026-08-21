@@ -13,7 +13,12 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from src.config import ExperimentConfig, ModelConfig, NeuralConfig
+from src.config import (
+    ExperimentConfig,
+    FeatureConfig,
+    ModelConfig,
+    NeuralConfig,
+)
 from src.data import load_csv, validate_train_schema
 from src.features import validate_feature_config_contract
 from src.models import validate_xgboost_backend
@@ -55,10 +60,17 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     experiment_config = ExperimentConfig(
+        features=FeatureConfig(
+            trackman_entity_enabled=False,
+        ),
         use_trackman=not args.no_trackman,
         use_main_history=False,
-        models=ModelConfig(xgb_device=args.xgb_device),
-        neural=NeuralConfig(enabled=False),
+        models=ModelConfig(
+            xgb_device=args.xgb_device,
+        ),
+        neural=NeuralConfig(
+            enabled=False,
+        ),
     )
     tabdpt_config = (
         TabDPTExperimentConfig(

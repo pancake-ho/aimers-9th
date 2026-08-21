@@ -33,10 +33,37 @@ class TabularPreprocessor:
         return [self.feature_names_.index(col) for col in self.cat_cols_]
 
     def fit(self, df: pd.DataFrame) -> "TabularPreprocessor":
+        if not df.columns.is_unique:
+            duplicated = (
+                df.columns[
+                    df.columns.duplicated(
+                        keep=False
+                    )
+                ]
+                .tolist()
+            )
+
+            counts = {
+                name: duplicated.count(name)
+                for name in sorted(
+                    set(duplicated)
+                )
+            }
+
+            raise ValueError(
+                "Input feature table contains "
+                "duplicate column names: "
+                f"{counts}"
+            )
+
         self.cat_cols_ = [
             col
             for col in self.requested_cat_cols
-            if col in df.columns and col not in self.excluded_cols
+            if (
+                col in df.columns
+                and col
+                not in self.excluded_cols
+            )
         ]
         numeric_candidates = df.select_dtypes(include=[np.number, "bool"]).columns.tolist()
         self.num_cols_ = [
