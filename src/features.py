@@ -481,24 +481,85 @@ class StrictPastTrackmanFeatures:
                 "thresholds": thresholds.__dict__.copy(),
             }
 
+        # ------------------------------------------------------------
+        # Final immutable Trackman runtime state.
+        #
+        # hand / hand_count are always available when Trackman is used.
+        # Entity profiles are optional and must never leak their feature
+        # names into the non-entity profiles.
+        # ------------------------------------------------------------
+
+        if not hand_names:
+            raise RuntimeError(
+                "Trackman hand profile produced no feature names."
+            )
+
+        if not hand_count_names:
+            raise RuntimeError(
+                "Trackman hand-count profile produced no feature names."
+            )
+
+        if len(hand_names) != len(set(hand_names)):
+            raise RuntimeError(
+                "Duplicate Trackman hand feature names detected."
+            )
+
+        if len(hand_count_names) != len(
+            set(hand_count_names)
+        ):
+            raise RuntimeError(
+                "Duplicate Trackman hand-count "
+                "feature names detected."
+            )
+
+        overlap = (
+            set(hand_names)
+            & set(hand_count_names)
+        )
+
+        if overlap:
+            raise RuntimeError(
+                "Trackman hand and hand-count "
+                "feature names overlap: "
+                f"{sorted(overlap)}"
+            )
+
         self.state_ = {
             "state_version": 2,
-            "source_seasons": [min_season, max_season],
-            "max_target_season": max_target_season,
+            "source_seasons": [
+                min_season,
+                max_season,
+            ],
+            "max_target_season": (
+                max_target_season
+            ),
             "profiles": {
                 "hand": {
                     "lookup": hand_lookup,
-                    "count_feature_names": hand_count_names,
-                    "defaults": {name: 0.0 for name in hand_names},
+                    "feature_names": list(
+                        hand_names
+                    ),
+                    "defaults": {
+                        name: 0.0
+                        for name
+                        in hand_names
+                    },
                 },
                 "hand_count": {
                     "lookup": count_lookup,
-                    "feature_names": entity_count_names,
-                    "defaults": {name: 0.0 for name in count_names},
+                    "feature_names": list(
+                        hand_count_names
+                    ),
+                    "defaults": {
+                        name: 0.0
+                        for name
+                        in hand_count_names
+                    },
                 },
             },
             "entity": entity_state,
         }
+
         del tm
         print(
             f"[FEATURE] Trackman keys: hand={len(hand_lookup):,}, "

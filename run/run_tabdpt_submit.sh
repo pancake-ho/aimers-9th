@@ -306,10 +306,12 @@ du -sh \
 
 cd "${LOCAL_PROJECT}"
 echo "[PREFLIGHT] Running TabDPT source and contract tests"
+
 python -m unittest \
     tests.test_tabdpt_context \
     tests.test_tabdpt_submission_contract \
     tests.test_feature_config_alignment \
+    tests.test_trackman_entity_contract \
     -q
 
 echo "[TRAIN] Forward validation, quality gate and final fit"

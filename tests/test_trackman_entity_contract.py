@@ -159,6 +159,224 @@ class TrackmanEntityContractTests(unittest.TestCase):
         self.assertEqual(float(transformed.loc[0, "tm_entity_map_available"]), 1.0)
         self.assertEqual(float(transformed.loc[1, "tm_entity_map_available"]), 0.0)
         self.assertGreater(float(transformed.loc[0, "tm_entity_rel_speed_mean"]), 0.0)
+    
+    def test_entity_disabled_keeps_base_trackman_profiles_valid(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = (
+                Path(directory)
+                / "trackman.csv"
+            )
+
+            _trackman_rows(
+                include_future=False
+            ).to_csv(
+                path,
+                index=False,
+            )
+
+            config = replace(
+                _test_config(),
+                trackman_entity_enabled=False,
+            )
+
+            builder = (
+                StrictPastTrackmanFeatures(
+                    config
+                ).fit_from_csv(
+                    path,
+                    main_train=_main_rows(
+                        include_future=False
+                    ),
+                )
+            )
+
+            state = builder.export_state()
+
+        self.assertIsNone(
+            state["entity"]
+        )
+
+        self.assertIn(
+            "hand",
+            state["profiles"],
+        )
+
+        self.assertIn(
+            "hand_count",
+            state["profiles"],
+        )
+
+        hand_profile = (
+            state["profiles"]["hand"]
+        )
+
+        hand_count_profile = (
+            state["profiles"]["hand_count"]
+        )
+
+        # Runtime contract:
+        # _lookup_trackman_profile()
+        # reads exactly "feature_names".
+        self.assertIn(
+            "feature_names",
+            hand_profile,
+        )
+
+        self.assertIn(
+            "feature_names",
+            hand_count_profile,
+        )
+
+        self.assertNotIn(
+            "count_feature_names",
+            hand_profile,
+        )
+
+        hand_names = list(
+            hand_profile[
+                "feature_names"
+            ]
+        )
+
+        hand_count_names = list(
+            hand_count_profile[
+                "feature_names"
+            ]
+        )
+
+        self.assertGreater(
+            len(hand_names),
+            0,
+        )
+
+        self.assertGreater(
+            len(hand_count_names),
+            0,
+        )
+
+        self.assertEqual(
+            len(hand_names),
+            len(set(hand_names)),
+        )
+
+        self.assertEqual(
+            len(hand_count_names),
+            len(set(hand_count_names)),
+        )
+
+        self.assertTrue(
+            all(
+                name.startswith(
+                    "tm_hand_"
+                )
+                for name
+                in hand_names
+            )
+        )
+
+        self.assertTrue(
+            all(
+                name.startswith(
+                    "tm_count_"
+                )
+                for name
+                in hand_count_names
+            )
+        )
+
+        self.assertEqual(
+            set(
+                hand_profile[
+                    "defaults"
+                ]
+            ),
+            set(hand_names),
+        )
+
+        self.assertEqual(
+            set(
+                hand_count_profile[
+                    "defaults"
+                ]
+            ),
+            set(hand_count_names),
+        )
+
+        raw = pd.DataFrame(
+            {
+                "season": [
+                    2021,
+                    2021,
+                ],
+                "pitcher_id": [
+                    11,
+                    22,
+                ],
+                "pitcher_hand": [
+                    2,
+                    2,
+                ],
+                "batter_hand": [
+                    2,
+                    2,
+                ],
+                "balls_before": [
+                    0,
+                    1,
+                ],
+                "strikes_before": [
+                    0,
+                    1,
+                ],
+            }
+        )
+
+        transformed = (
+            add_trackman_features(
+                raw,
+                state,
+            )
+        )
+
+        hand_columns = [
+            column
+            for column
+            in transformed.columns
+            if column.startswith(
+                "tm_hand_"
+            )
+        ]
+
+        count_columns = [
+            column
+            for column
+            in transformed.columns
+            if column.startswith(
+                "tm_count_"
+            )
+        ]
+
+        self.assertEqual(
+            set(hand_columns),
+            set(hand_names),
+        )
+
+        self.assertEqual(
+            set(count_columns),
+            set(hand_count_names),
+        )
+
+        self.assertFalse(
+            any(
+                column.startswith(
+                    "tm_entity_"
+                )
+                for column
+                in transformed.columns
+            )
+        )
 
     def test_future_rows_cannot_change_past_mapping_or_profile(self):
         past = self._build(include_future=False)
