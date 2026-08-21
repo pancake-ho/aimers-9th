@@ -101,71 +101,83 @@ conda activate aimers
 echo "[ENV] conda=${CONDA_DEFAULT_ENV:-unknown}"
 echo "[ENV] python=$(which python)"
 python --version
-TORCH_BUILD_OK=1
+
+echo "[ENV] package versions"
 if ! python - <<'PY'
 import sys
 
 import catboost
+import lightgbm
 import numpy
 import pandas
 import torch
 import xgboost
-import lightgbm
 
 print(f"[ENV] numpy={numpy.__version__}")
 print(f"[ENV] pandas={pandas.__version__}")
-print(f"[ENV] catboost={catboost.__version__}")
 print(f"[ENV] xgboost={xgboost.__version__}")
+print(f"[ENV] lightgbm={lightgbm.__version__}")
+print(f"[ENV] catboost={catboost.__version__}")
 print(f"[ENV] torch={torch.__version__}")
 print(f"[ENV] torch_cuda_build={torch.version.cuda}")
-print(
-    f"[ENV] lightgbm="
-    f"{lightgbm.__version__}"
-)
 
-torch_base_version = torch.__version__.split("+", 1)[0]
-if torch_base_version != "2.5.1" or torch.version.cuda != "12.1":
+# Do NOT require one exact PyTorch/CUDA wheel.
+# The compute-node functional probe below is the actual compatibility test.
+if torch.version.cuda is None:
     print(
-        "[ERROR] Incompatible PyTorch build. "
-        "Expected torch=2.5.1+cu121 and torch.version.cuda=12.1.",
-        file=sys.stderr,
-    )
-    print(
-        "[FIX] Run from the login node: bash run/fix_torch_env.sh",
+        "[ERROR] Installed PyTorch is a CPU-only build. "
+        "Neural training requires CUDA-enabled PyTorch.",
         file=sys.stderr,
     )
     raise SystemExit(65)
 PY
 then
-    TORCH_BUILD_OK=0
-    echo "[WARN] Preferred PyTorch CUDA build is unavailable."
-    echo "[ERROR] ResNet/FT-Transformer require the pinned PyTorch build."
+    echo "[ERROR] Required Python runtime packages are unavailable."
+    exit 65
 fi
 
+
 echo "[RESOURCE] CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-unset}"
+
 GPU_READY=1
+
+# ------------------------------------------------------------
+# 1. NVIDIA driver visibility
+# ------------------------------------------------------------
 if ! nvidia-smi; then
     GPU_READY=0
-    echo "[WARN] NVIDIA driver could not open the allocated GPU on $(hostname -s)."
-    echo "[ERROR] Neural training requires the allocated GPU."
+    echo "[ERROR] nvidia-smi cannot access the allocated GPU on $(hostname -s)."
 fi
 
 if [[ "${GPU_READY}" -eq 1 ]]; then
     nvidia-smi -L || true
 
     echo "[GPU-DIAG] NVIDIA device nodes"
-    for device_node in /dev/nvidiactl /dev/nvidia-uvm /dev/nvidia-uvm-tools; do
+
+    for device_node in \
+        /dev/nvidiactl \
+        /dev/nvidia-uvm \
+        /dev/nvidia-uvm-tools
+    do
         if [[ -e "${device_node}" ]]; then
             ls -l "${device_node}"
         else
             echo "[GPU-DIAG] MISSING ${device_node}"
         fi
     done
+
     for device_node in /dev/nvidia[0-9]*; do
         [[ -e "${device_node}" ]] && ls -l "${device_node}"
     done
+fi
 
+
+# ------------------------------------------------------------
+# 2. CUDA Driver API
+# ------------------------------------------------------------
+if [[ "${GPU_READY}" -eq 1 ]]; then
     echo "[GPU-DIAG] Direct CUDA Driver API initialization"
+
     if ! python - <<'PY'
 import ctypes
 import ctypes.util
@@ -174,61 +186,84 @@ import socket
 import sys
 
 library = ctypes.util.find_library("cuda") or "libcuda.so.1"
+
 print(f"[GPU-DIAG] libcuda={library}")
-print(f"[GPU-DIAG] LD_LIBRARY_PATH={os.environ.get('LD_LIBRARY_PATH', '')}")
+print(
+    f"[GPU-DIAG] LD_LIBRARY_PATH="
+    f"{os.environ.get('LD_LIBRARY_PATH', '')}"
+)
 
 try:
     cuda = ctypes.CDLL(library)
 except OSError as exc:
-    print(f"[ERROR] Cannot load NVIDIA libcuda.so.1: {exc}", file=sys.stderr)
+    print(
+        f"[ERROR] Cannot load NVIDIA libcuda.so.1: {exc}",
+        file=sys.stderr,
+    )
     raise SystemExit(71)
 
 cuda.cuInit.argtypes = [ctypes.c_uint]
 cuda.cuInit.restype = ctypes.c_int
+
 result = int(cuda.cuInit(0))
 
 name = ctypes.c_char_p()
 description = ctypes.c_char_p()
-if hasattr(cuda, "cuGetErrorName"):
-    cuda.cuGetErrorName(result, ctypes.byref(name))
-if hasattr(cuda, "cuGetErrorString"):
-    cuda.cuGetErrorString(result, ctypes.byref(description))
 
-error_name = name.value.decode() if name.value else "UNKNOWN"
-error_description = description.value.decode() if description.value else "no description"
+if hasattr(cuda, "cuGetErrorName"):
+    cuda.cuGetErrorName(
+        result,
+        ctypes.byref(name),
+    )
+
+if hasattr(cuda, "cuGetErrorString"):
+    cuda.cuGetErrorString(
+        result,
+        ctypes.byref(description),
+    )
+
+error_name = (
+    name.value.decode()
+    if name.value
+    else "UNKNOWN"
+)
+
+error_description = (
+    description.value.decode()
+    if description.value
+    else "no description"
+)
+
 print(
     f"[GPU-DIAG] cuInit_result={result} "
-    f"name={error_name} description={error_description}"
+    f"name={error_name} "
+    f"description={error_description}"
 )
 
 if result != 0:
     print(
-        "[ERROR] CUDA Driver API initialization failed before PyTorch. "
-        f"host={socket.gethostname()} job={os.environ.get('SLURM_JOB_ID', 'unknown')}",
-        file=sys.stderr,
-    )
-    print(
-        "[ERROR] nvidia-smi success does not prove that CUDA compute/UVM is usable. "
-        "This node requires administrator repair or a different allocation.",
+        "[ERROR] CUDA Driver API initialization failed. "
+        f"host={socket.gethostname()} "
+        f"job={os.environ.get('SLURM_JOB_ID', 'unknown')}",
         file=sys.stderr,
     )
     raise SystemExit(71)
 PY
     then
         GPU_READY=0
-        echo "[ERROR] CUDA Driver API is unavailable for neural training."
+        echo "[ERROR] CUDA Driver API is unavailable."
     fi
 fi
 
-free -h
-df -h /local_datasets
 
-if [[ "${TORCH_BUILD_OK}" -eq 0 ]]; then
-    GPU_READY=0
-fi
-
+# ------------------------------------------------------------
+# 3. Actual PyTorch CUDA compute test
+#
+# This, not an exact wheel version, is the compatibility contract.
+# ------------------------------------------------------------
 if [[ "${GPU_READY}" -eq 1 ]]; then
-    echo "[GPU-PROBE] Testing PyTorch CUDA initialization"
+    echo "[GPU-PROBE] Testing PyTorch CUDA forward/backward"
+
     if ! python - <<'PY'
 import os
 import socket
@@ -236,30 +271,101 @@ import sys
 
 import torch
 
+print(f"[GPU-PROBE] torch={torch.__version__}")
+print(f"[GPU-PROBE] torch_cuda_build={torch.version.cuda}")
+
 if not torch.cuda.is_available():
     print(
-        "[ERROR] torch.cuda.is_available() is false after a successful cuInit. "
-        f"host={socket.gethostname()} job={os.environ.get('SLURM_JOB_ID', 'unknown')}",
+        "[ERROR] torch.cuda.is_available() is false. "
+        f"host={socket.gethostname()} "
+        f"job={os.environ.get('SLURM_JOB_ID', 'unknown')}",
         file=sys.stderr,
     )
     raise SystemExit(72)
+
 device = torch.device("cuda")
-x = torch.randn(1024, 1024, device=device)
-y = x @ x.T
-assert torch.isfinite(y).all()
+
+print(
+    f"[GPU-PROBE] device="
+    f"{torch.cuda.get_device_name(0)}"
+)
+print(
+    f"[GPU-PROBE] capability="
+    f"{torch.cuda.get_device_capability(0)}"
+)
+
+# Exercise the operations used by the neural learners:
+# CUDA allocation + GEMM + autocast + backward.
+x = torch.randn(
+    1024,
+    1024,
+    device=device,
+    requires_grad=True,
+)
+
+with torch.autocast(
+    device_type="cuda",
+    dtype=torch.float16,
+):
+    y = (x @ x.T).square().mean()
+
+if not torch.isfinite(y):
+    raise RuntimeError(
+        "PyTorch CUDA forward produced a non-finite value."
+    )
+
+y.backward()
+
+if x.grad is None:
+    raise RuntimeError(
+        "PyTorch CUDA backward did not produce gradients."
+    )
+
+if not torch.isfinite(x.grad).all():
+    raise RuntimeError(
+        "PyTorch CUDA backward produced non-finite gradients."
+    )
+
 torch.cuda.synchronize()
-print(f"[GPU-PROBE] PASS device={torch.cuda.get_device_name(0)}")
+
+allocated_mb = (
+    torch.cuda.max_memory_allocated()
+    / (1024 ** 2)
+)
+
+print(
+    "[GPU-PROBE] PASS "
+    f"device={torch.cuda.get_device_name(0)} "
+    f"peak_allocated={allocated_mb:.1f}MiB"
+)
 PY
     then
         GPU_READY=0
-        echo "[ERROR] PyTorch CUDA probe failed for ResNet/FT-Transformer."
+        echo "[ERROR] PyTorch CUDA compute probe failed."
+        echo "[ERROR] Only now should the PyTorch environment be repaired."
     fi
 fi
 
+
+# ------------------------------------------------------------
+# Resource diagnostics
+# ------------------------------------------------------------
+free -h
+df -h /local_datasets
+
+if [[ -r /sys/fs/cgroup/memory.max ]]; then
+    echo "[RESOURCE] cgroup memory.max=$(cat /sys/fs/cgroup/memory.max)"
+elif [[ -r /sys/fs/cgroup/memory/memory.limit_in_bytes ]]; then
+    echo "[RESOURCE] cgroup memory.limit_in_bytes=$(cat /sys/fs/cgroup/memory/memory.limit_in_bytes)"
+fi
+
+
 if [[ "${GPU_READY}" -ne 1 ]]; then
-    echo "[ERROR] No valid CUDA backend; no lower-quality submit.zip will be built."
+    echo "[ERROR] No valid CUDA backend; refusing neural training."
     exit 73
 fi
+
+echo "[GPU] Functional CUDA backend confirmed."
 echo "[MODE] xgb+lgb+cat+resnet+ft_transformer temporal_v9"
 
 echo "[PREFLIGHT] Validating DACON submission requirements before training"
@@ -281,7 +387,12 @@ echo "[PREFLIGHT] Exercising feature and neural source contracts"
 (
     cd "${PROJECT_DIR}"
     python -m unittest \
+        tests.test_config_contract \
         tests.test_feature_config_alignment \
+        tests.test_four_model_ensemble \
+        tests.test_optional_neural_submission \
+        tests.test_run_script_contract \
+        tests.test_runtime_contract \
         tests.test_trackman_entity_contract \
         tests.test_neural_config_alignment \
         tests.test_neural_contract \

@@ -524,7 +524,42 @@ def run_temporal_validation(
     by_label = {item["validation_label"]: item for item in fold_summaries}
     guard_2023 = float(by_label["2023"]["ensemble"]["brier"])
     anchor_2024_raw = float(by_label["2024"]["ensemble"]["brier"])
-    anchor_2024_transferred = float(transfer_metrics["brier"])
+    guard_2023 = float(
+        by_label["2023"][
+            "ensemble"
+        ]["brier"]
+    )
+
+    anchor_2024 = float(
+        by_label["2024"][
+            "ensemble"
+        ]["brier"]
+    )
+
+    late = (
+        by_label[
+            "2024_late_abs"
+        ]
+    )
+
+    late_ensemble = float(
+        late["ensemble"]["brier"]
+    )
+
+    late_transferred_brier = float(
+        transfer_metrics["brier"]
+    )
+
+    late_best_component = min(
+        float(metrics["brier"])
+        for metrics
+        in late["models"].values()
+    )
+
+    late_blend_gain = (
+        late_best_component
+        - late_ensemble
+    )
     # Use the calibrated score only when the intercept was estimated on 2023
     # and improved 2024 without seeing 2024 labels. This is a genuine
     # one-season-forward result, not in-fold calibration.
@@ -579,16 +614,45 @@ def run_temporal_validation(
         "passed": bool(all(checks.values())),
         "checks": checks,
         "observed": {
-            "2023_brier": guard_2023,
-            "2024_raw_brier": anchor_2024_raw,
-            "2024_transferred_brier": anchor_2024_transferred,
-            "2024_gate_brier": anchor_2024,
-            "2024_gate_uses_transferred_calibration": bool(calibrator["accepted"]),
-            "2024_late_brier": late_ensemble,
-            "2024_late_best_component_brier": late_best_component,
-            "2024_late_blend_gain": late_blend_gain,
-            "entity_2024_xgb_brier_gain": entity_2024_gain,
-            "entity_late_xgb_brier_gain": entity_late_gain,
+            "2023_brier": (
+                guard_2023
+            ),
+            "2024_raw_brier": (
+                anchor_2024
+            ),
+            "2024_gate_brier": (
+                anchor_2024
+            ),
+            "2024_gate_uses_calibration": False,
+
+            "2024_late_raw_brier": (
+                late_ensemble
+            ),
+            "2024_late_transferred_brier": (
+                late_transferred_brier
+            ),
+            "2024_late_best_component_brier": (
+                late_best_component
+            ),
+            "2024_late_blend_gain": (
+                late_blend_gain
+            ),
+
+            "calibration_accepted": bool(
+                calibrator["accepted"]
+            ),
+            "calibration_transfer_gain": float(
+                calibrator[
+                    "transfer_gain"
+                ]
+            ),
+
+            "entity_2024_xgb_brier_gain": (
+                entity_2024_gain
+            ),
+            "entity_late_xgb_brier_gain": (
+                entity_late_gain
+            ),
         },
         "thresholds": {
             "2023_max_brier": config.submission_gate_2023_max_brier,

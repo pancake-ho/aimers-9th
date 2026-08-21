@@ -51,44 +51,101 @@ def _sha256(path: Path) -> str:
 
 def _required_files() -> dict[str, Path]:
     files = {
-        "script.py": SUBMISSION_DIR / "script.py",
-        "requirements.txt": SUBMISSION_DIR / "requirements.txt",
-        "model/runtime.py": RUNTIME_PATH,
+        "script.py": (
+            SUBMISSION_DIR / "script.py"
+        ),
+        "requirements.txt": (
+            SUBMISSION_DIR
+            / "requirements.txt"
+        ),
+        "model/runtime.py": (
+            RUNTIME_PATH
+        ),
     }
-    files.update({f"model/{name}": MODEL_DIR / name for name in CORE_MODEL_FILES})
 
-    manifest_path = MODEL_DIR / "manifest.json"
+    files.update(
+        {
+            f"model/{name}": (
+                MODEL_DIR / name
+            )
+            for name in CORE_MODEL_FILES
+        }
+    )
+
+    manifest_path = (
+        MODEL_DIR / "manifest.json"
+    )
+
+    # During very early preflight the trained
+    # manifest may not exist yet.
     if not manifest_path.is_file():
         return files
-    with manifest_path.open("r", encoding="utf-8") as handle:
+
+    with manifest_path.open(
+        "r",
+        encoding="utf-8",
+    ) as handle:
         manifest = json.load(handle)
-    model_order = list(manifest.get("model_order", ()))
-    if model_order == [
-        "xgb",
-        "lgb",
-        "cat",
-    ]:
-        return files
-    supported_neural_orders = (
-        [
+
+    model_order = tuple(
+        manifest.get(
+            "model_order",
+            (),
+        )
+    )
+
+    supported_orders = {
+        (
+            "xgb",
+            "lgb",
+            "cat",
+        ),
+        (
             "xgb",
             "lgb",
             "cat",
             "resnet",
-        ],
-        [
+        ),
+        (
             "xgb",
             "lgb",
             "cat",
             "resnet",
             "ft_transformer",
-        ],
-    )
-    if model_order not in supported_neural_orders:
-        raise ValueError(f"Unsupported manifest model_order: {model_order}")
-    files["model/neural_runtime.py"] = NEURAL_RUNTIME_PATH
-    for name in model_order[2:]:
-        files[f"model/{name}.pt"] = MODEL_DIR / f"{name}.pt"
+        ),
+    }
+
+    if model_order not in supported_orders:
+        raise ValueError(
+            "Unsupported manifest "
+            f"model_order: {model_order}"
+        )
+
+    # Do not derive neural models using
+    # a hard-coded GBDT slice.
+    neural_names = [
+        name
+        for name in model_order
+        if name
+        in {
+            "resnet",
+            "ft_transformer",
+        }
+    ]
+
+    if neural_names:
+        files[
+            "model/neural_runtime.py"
+        ] = NEURAL_RUNTIME_PATH
+
+        for name in neural_names:
+            files[
+                f"model/{name}.pt"
+            ] = (
+                MODEL_DIR
+                / f"{name}.pt"
+            )
+
     return files
 
 
