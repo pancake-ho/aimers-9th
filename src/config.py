@@ -221,36 +221,149 @@ class NeuralConfig:
 
 @dataclass(frozen=True)
 class ExperimentConfig:
-    paths: PathConfig = field(default_factory=PathConfig)
-    features: FeatureConfig = field(default_factory=FeatureConfig)
-    models: ModelConfig = field(default_factory=ModelConfig)
-    neural: NeuralConfig = field(default_factory=NeuralConfig)
-    use_trackman: bool = True
-    # The strictly-past target profile is leakage-safe, but the completed
-    # 2024 ablation worsened CatBoost by 0.00040154 Brier. Keep the code for
-    # controlled experiments and disable it for the next submission.
-    use_main_history: bool = False
-    temporal_fold_importance: Tuple[float, ...] = (0.05, 0.45, 0.50)
-    ensemble_grid_step: float = 0.025
-    # An ensemble may optimize the weighted average while regressing on the
-    # closest observable regimes. Require it to dominate the best stable
-    # single model on both full-2024 and late-2024 before packaging.
-    ensemble_protected_folds: Tuple[str, ...] = ("2024", "2024_late_abs")
-    ensemble_non_degradation_tolerance: float = 0.0
-    temporal_folds: Tuple[Tuple[Tuple[int, ...], int], ...] = (
-        ((2019, 2020, 2021, 2022), 2023),
-        ((2019, 2020, 2021, 2022, 2023), 2024),
+    paths: PathConfig = field(
+        default_factory=PathConfig
     )
+
+    features: FeatureConfig = field(
+        default_factory=FeatureConfig
+    )
+
+    models: ModelConfig = field(
+        default_factory=ModelConfig
+    )
+
+    neural: NeuralConfig = field(
+        default_factory=NeuralConfig
+    )
+
+    use_trackman: bool = True
+
+    # Completed ablation worsened temporal Brier.
+    # Keep the implementation but exclude it from V10.
+    use_main_history: bool = False
+
+    # --------------------------------------------------------
+    # Temporal validation
+    # --------------------------------------------------------
+
+    temporal_fold_importance: Tuple[
+        float,
+        ...
+    ] = (
+        0.05,
+        0.45,
+        0.50,
+    )
+
+    temporal_folds: Tuple[
+        Tuple[
+            Tuple[int, ...],
+            int,
+        ],
+        ...
+    ] = (
+        (
+            (
+                2019,
+                2020,
+                2021,
+                2022,
+            ),
+            2023,
+        ),
+        (
+            (
+                2019,
+                2020,
+                2021,
+                2022,
+                2023,
+            ),
+            2024,
+        ),
+    )
+
     abs_late_train_month_max: int = 6
-    abs_late_valid_months: Tuple[int, ...] = (7, 8, 9)
-    # The 895-point branch recorded about 0.24796 on the 2024 holdout.  A
-    # reduction near 0.00026 is the score-equivalent improvement needed to
-    # reach 1000 from that anchor, so final training is gated at 0.24770.
+
+    abs_late_valid_months: Tuple[
+        int,
+        ...
+    ] = (
+        7,
+        8,
+        9,
+    )
+
+    # --------------------------------------------------------
+    # Raw ensemble search
+    # --------------------------------------------------------
+
+    ensemble_grid_step: float = 0.025
+
+    ensemble_protected_folds: Tuple[
+        str,
+        ...
+    ] = (
+        "2024",
+        "2024_late_abs",
+    )
+
+    ensemble_non_degradation_tolerance: float = 0.0
+
+    # --------------------------------------------------------
+    # Calibration-aware shrinkage
+    #
+    # First find the raw temporal-optimal ensemble.
+    # Then shrink it toward the most stable model, XGBoost.
+    #
+    # alpha=0 -> XGB only
+    # alpha=1 -> original raw-optimal ensemble
+    #
+    # Candidate alpha is selected using the actually deployed
+    # procedure: raw 2024 + forward-calibrated late-2024 Brier.
+    # --------------------------------------------------------
+
+    ensemble_shrinkage_reference_model: str = "xgb"
+
+    ensemble_shrinkage_alphas: Tuple[
+        float,
+        ...
+    ] = (
+        0.00,
+        0.25,
+        0.50,
+        0.75,
+        1.00,
+    )
+
+    # --------------------------------------------------------
+    # Submission quality gate
+    #
+    # V10 deliberately replaces the old arbitrary absolute
+    # 0.24800 raw-Brier target with forward relative checks.
+    #
+    # The candidate must not regress against the stable XGB
+    # reference and its ABS calibration must transfer.
+    # --------------------------------------------------------
+
     submission_gate_2023_max_brier: float = 0.25018
-    submission_gate_2024_max_brier: float = 0.24800
-    submission_gate_late_min_blend_gain: float = 0.0
-    # Paired XGBoost ablation isolates the new physical/entity feature family
-    # from model-family and ensemble changes.  Both closest temporal proxies
-    # must clear a non-trivial Brier improvement before a zip is produced.
-    submission_gate_entity_2024_min_gain: float = 0.00003
-    submission_gate_entity_late_min_gain: float = 0.00003
+
+    submission_gate_2024_min_gain_vs_reference: float = 0.0
+
+    submission_gate_late_raw_min_gain_vs_reference: float = 0.0
+
+    submission_gate_calibration_min_transfer_gain: float = 3.0e-5
+
+    submission_gate_late_calibrated_min_gain_vs_reference: float = 5.0e-5
+
+    # --------------------------------------------------------
+    # Trackman entity gates.
+    #
+    # Entity resolution remains disabled in production V10.
+    # Keep these values for the separate entity experiment.
+    # --------------------------------------------------------
+
+    submission_gate_entity_2024_min_gain: float = 3.0e-5
+
+    submission_gate_entity_late_min_gain: float = 3.0e-5

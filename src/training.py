@@ -11,8 +11,7 @@ import numpy as np
 import pandas as pd
 
 from src.calibration import (
-    fit_abs_regime_logit_calibrator,
-    select_stable_weights,
+    select_calibration_aware_shrunk_weights,
 )
 from src.config import ExperimentConfig
 from src.features import (
@@ -53,12 +52,12 @@ def _active_neural_models(config: ExperimentConfig) -> tuple[str, ...]:
 
 
 def _strategy_name(
-    model_order: tuple[str, ...]
+    model_order: tuple[str, ...],
 ) -> str:
     if model_order == GBDT_MODEL_ORDER:
         return (
             "temporal_xgb_lgb_cat_"
-            "abs_calibration_v9"
+            "calibrated_shrink_v10"
         )
 
     if model_order == (
@@ -67,7 +66,7 @@ def _strategy_name(
     ):
         return (
             "temporal_xgb_lgb_cat_"
-            "resnet_abs_calibration_v9"
+            "resnet_calibrated_shrink_v10"
         )
 
     if model_order == (
@@ -77,11 +76,13 @@ def _strategy_name(
     ):
         return (
             "temporal_xgb_lgb_cat_"
-            "resnet_ftt_abs_calibration_v9"
+            "resnet_ftt_"
+            "calibrated_shrink_v10"
         )
 
     raise ValueError(
-        f"Unsupported model order: {model_order}"
+        "Unsupported model order: "
+        f"{model_order}"
     )
 
 
@@ -375,24 +376,60 @@ def run_temporal_validation(
             "This submission strategy requires 2023, 2024 and late-2024 holdouts."
         )
 
-    weights, weight_report = select_stable_weights(
-        fold_results,
-        fold_importance=config.temporal_fold_importance,
-        step=config.ensemble_grid_step,
-        model_order=model_order,
-        protected_fold_labels=config.ensemble_protected_folds,
-        non_degradation_tolerance=config.ensemble_non_degradation_tolerance,
-    )
-    calibrator = (
-        fit_abs_regime_logit_calibrator(
-            full_2024_fold=fold_results[1],
-            late_2024_fold=fold_results[2],
-            weights=weights,
+    (
+        weights,
+        weight_report,
+        calibrator,
+    ) = (
+        select_calibration_aware_shrunk_weights(
+            fold_results,
+            fold_importance=(
+                config.temporal_fold_importance
+            ),
+            step=(
+                config.ensemble_grid_step
+            ),
             model_order=model_order,
+            protected_fold_labels=(
+                config.ensemble_protected_folds
+            ),
+            non_degradation_tolerance=(
+                config
+                .ensemble_non_degradation_tolerance
+            ),
+            reference_model=(
+                config
+                .ensemble_shrinkage_reference_model
+            ),
+            alpha_grid=(
+                config
+                .ensemble_shrinkage_alphas
+            ),
             early_month_max=(
-                config.abs_late_train_month_max
+                config
+                .abs_late_train_month_max
+            ),
+            maximum_2023_brier=(
+                config
+                .submission_gate_2023_max_brier
+            ),
+            minimum_calibration_transfer_gain=(
+                config
+                .submission_gate_calibration_min_transfer_gain
             ),
         )
+    )
+
+    print(
+        "[SHRINKAGE] "
+        f"reference="
+        f"{weight_report['reference_model']} "
+        f"raw_optimal="
+        f"{weight_report['raw_optimal_weights']} "
+        f"selected_alpha="
+        f"{weight_report['selected_alpha']:.2f} "
+        f"final_weights="
+        f"{weight_report['weights']}"
     )
 
     fold_summaries = []
@@ -528,21 +565,20 @@ def run_temporal_validation(
 
 
     # --------------------------------------------------------
-    # Temporal submission-gate metrics
+    # V10 deployment-aware submission gate
     # --------------------------------------------------------
 
     guard_2023 = float(
-        by_label["2023"][
-            "ensemble"
-        ]["brier"]
+        by_label[
+            "2023"
+        ]["ensemble"]["brier"]
     )
 
     anchor_2024 = float(
-        by_label["2024"][
-            "ensemble"
-        ]["brier"]
+        by_label[
+            "2024"
+        ]["ensemble"]["brier"]
     )
-
 
     late_summary = (
         by_label[
@@ -562,28 +598,41 @@ def run_temporal_validation(
         ]
     )
 
-    late_best_component = min(
-        float(
-            metrics["brier"]
-        )
-        for metrics
-        in late_summary[
-            "models"
-        ].values()
+    reference_model = (
+        config
+        .ensemble_shrinkage_reference_model
     )
 
-    late_blend_gain = float(
-        late_best_component
+    reference_2024_brier = float(
+        by_label[
+            "2024"
+        ]["models"][
+            reference_model
+        ]["brier"]
+    )
+
+    reference_late_brier = float(
+        by_label[
+            "2024_late_abs"
+        ]["models"][
+            reference_model
+        ]["brier"]
+    )
+
+    gain_2024_vs_reference = float(
+        reference_2024_brier
+        - anchor_2024
+    )
+
+    gain_late_raw_vs_reference = float(
+        reference_late_brier
         - late_raw_brier
     )
 
-
-    # --------------------------------------------------------
-    # Optional Trackman entity-resolution gate
-    #
-    # Currently production has entity resolution disabled,
-    # therefore these remain None.
-    # --------------------------------------------------------
+    gain_late_calibrated_vs_reference = float(
+        reference_late_brier
+        - late_transferred_brier
+    )
 
     entity_2024_gain = (
         float(
@@ -604,84 +653,189 @@ def run_temporal_validation(
         if entity_gate_required
         else None
     )
+
     checks = {
+        "shrinkage_selection": bool(
+            weight_report[
+                "selection_passed"
+            ]
+        ),
+
         "2023_guard": (
             guard_2023
-            <= config.submission_gate_2023_max_brier
+            <= config
+            .submission_gate_2023_max_brier
         ),
-        "2024_target": (
-            anchor_2024
-            <= config.submission_gate_2024_max_brier
+
+        "2024_non_degradation": (
+            gain_2024_vs_reference
+            + 1.0e-15
+            >= config
+            .submission_gate_2024_min_gain_vs_reference
         ),
-        "late_abs_blend": (
-            late_blend_gain
-            >= config.submission_gate_late_min_blend_gain
+
+        "late_raw_non_degradation": (
+            gain_late_raw_vs_reference
+            + 1.0e-15
+            >= config
+            .submission_gate_late_raw_min_gain_vs_reference
         ),
-        "calibration_late_transfer": (
-            not calibrator["accepted"]
-            or calibrator["transfer_gain"] > 0.0
+
+        "calibration_accepted": bool(
+            calibrator["accepted"]
         ),
+
+        "calibration_transfer_gain": (
+            float(
+                calibrator[
+                    "transfer_gain"
+                ]
+            )
+            + 1.0e-15
+            >= config
+            .submission_gate_calibration_min_transfer_gain
+        ),
+
+        "late_calibrated_gain_vs_reference": (
+            gain_late_calibrated_vs_reference
+            + 1.0e-15
+            >= config
+            .submission_gate_late_calibrated_min_gain_vs_reference
+        ),
+
         "entity_2024_paired_ablation": (
             not entity_gate_required
             or entity_2024_gain
-            >= config.submission_gate_entity_2024_min_gain
+            >= config
+            .submission_gate_entity_2024_min_gain
         ),
+
         "entity_late_paired_ablation": (
             not entity_gate_required
             or entity_late_gain
-            >= config.submission_gate_entity_late_min_gain
+            >= config
+            .submission_gate_entity_late_min_gain
         ),
     }
-    report["submission_gate"] = {
-        "passed": bool(all(checks.values())),
+
+    report[
+        "submission_gate"
+    ] = {
+        "passed": bool(
+            all(
+                checks.values()
+            )
+        ),
+
         "checks": checks,
+
         "observed": {
+            "selected_alpha": float(
+                weight_report[
+                    "selected_alpha"
+                ]
+            ),
+
+            "weights": list(
+                weights
+            ),
+
+            "reference_model": (
+                reference_model
+            ),
+
             "2023_brier": (
                 guard_2023
             ),
+
             "2024_raw_brier": (
                 anchor_2024
             ),
-            "2024_gate_brier": (
-                anchor_2024
-            ),
-            "2024_gate_uses_calibration": False,
 
-            "2024_late_raw_brier": (
+            "2024_reference_brier": (
+                reference_2024_brier
+            ),
+
+            "2024_gain_vs_reference": (
+                gain_2024_vs_reference
+            ),
+
+            "late_raw_brier": (
                 late_raw_brier
             ),
-            "2024_late_transferred_brier": (
-                late_transferred_brier
-            ),
-            "2024_late_best_component_brier": (
-                late_best_component
-            ),
-            "2024_late_blend_gain": (
-                late_blend_gain
+
+            "late_reference_brier": (
+                reference_late_brier
             ),
 
-            "calibration_accepted": bool(
-                calibrator["accepted"]
+            "late_raw_gain_vs_reference": (
+                gain_late_raw_vs_reference
             ),
+
+            "late_calibrated_brier": (
+                late_transferred_brier
+            ),
+
+            "late_calibrated_gain_vs_reference": (
+                gain_late_calibrated_vs_reference
+            ),
+
             "calibration_transfer_gain": float(
                 calibrator[
                     "transfer_gain"
                 ]
             ),
 
+            "calibration_final_intercept": float(
+                calibrator[
+                    "intercept"
+                ]
+            ),
+
             "entity_2024_xgb_brier_gain": (
                 entity_2024_gain
             ),
+
             "entity_late_xgb_brier_gain": (
                 entity_late_gain
             ),
         },
+
         "thresholds": {
-            "2023_max_brier": config.submission_gate_2023_max_brier,
-            "2024_max_brier": config.submission_gate_2024_max_brier,
-            "2024_late_min_blend_gain": config.submission_gate_late_min_blend_gain,
-            "entity_2024_min_gain": config.submission_gate_entity_2024_min_gain,
-            "entity_late_min_gain": config.submission_gate_entity_late_min_gain,
+            "2023_max_brier": (
+                config
+                .submission_gate_2023_max_brier
+            ),
+
+            "2024_min_gain_vs_reference": (
+                config
+                .submission_gate_2024_min_gain_vs_reference
+            ),
+
+            "late_raw_min_gain_vs_reference": (
+                config
+                .submission_gate_late_raw_min_gain_vs_reference
+            ),
+
+            "calibration_min_transfer_gain": (
+                config
+                .submission_gate_calibration_min_transfer_gain
+            ),
+
+            "late_calibrated_min_gain_vs_reference": (
+                config
+                .submission_gate_late_calibrated_min_gain_vs_reference
+            ),
+
+            "entity_2024_min_gain": (
+                config
+                .submission_gate_entity_2024_min_gain
+            ),
+
+            "entity_late_min_gain": (
+                config
+                .submission_gate_entity_late_min_gain
+            ),
         },
     }
     return ensemble_state, report

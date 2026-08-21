@@ -418,3 +418,505 @@ def fit_abs_regime_logit_calibrator(
             - late_transferred_brier
         ),
     }
+
+def _fold_brier_with_weights(
+    fold: Mapping[str, object],
+    weights: Sequence[float],
+    model_order: Sequence[str],
+) -> float:
+    prediction = blend_predictions(
+        [
+            fold["predictions"][name]
+            for name in model_order
+        ],
+        weights,
+    )
+
+    return brier_score(
+        fold["y_true"],
+        prediction,
+    )
+
+
+def select_calibration_aware_shrunk_weights(
+    folds: Sequence[
+        Mapping[str, object]
+    ],
+    *,
+    fold_importance: Sequence[float],
+    step: float,
+    model_order: Sequence[str],
+    protected_fold_labels: Sequence[str],
+    non_degradation_tolerance: float,
+    reference_model: str,
+    alpha_grid: Sequence[float],
+    early_month_max: int,
+    maximum_2023_brier: float,
+    minimum_calibration_transfer_gain: float,
+) -> tuple[
+    np.ndarray,
+    Dict[str, object],
+    Dict[str, object],
+]:
+    """Select a temporally robust calibrated ensemble.
+
+    Procedure
+    ---------
+    1. Find the normal raw-Brier optimal ensemble on the
+       temporal folds with the existing protected-fold gate.
+
+    2. Construct a stable prior consisting of the reference
+       model only (XGBoost in V10).
+
+    3. Shrink the raw-optimal weights toward that prior:
+
+           w(alpha)
+             = (1-alpha) * w_reference
+               + alpha * w_raw_opt
+
+       alpha=0 gives the stable reference.
+       alpha=1 recovers the V9 raw-optimal ensemble.
+
+    4. For each alpha, fit the existing ABS-regime
+       calibrator:
+         early 2024 -> late 2024 transfer.
+
+    5. Select alpha using the deployed probability pipeline:
+         2023 raw Brier
+         + 2024 raw Brier
+         + late-2024 forward-calibrated Brier.
+
+    No test-row statistic is used.
+    """
+
+    if len(folds) != 3:
+        raise ValueError(
+            "Calibration-aware shrinkage "
+            "requires exactly three temporal folds."
+        )
+
+    labels = [
+        str(
+            fold.get(
+                "validation_label",
+                fold.get(
+                    "valid_season",
+                    "",
+                ),
+            )
+        )
+        for fold in folds
+    ]
+
+    required_labels = {
+        "2023",
+        "2024",
+        "2024_late_abs",
+    }
+
+    if set(labels) != required_labels:
+        raise ValueError(
+            "Unexpected temporal folds for "
+            "calibration-aware shrinkage: "
+            f"{labels}"
+        )
+
+    if reference_model not in model_order:
+        raise ValueError(
+            "Shrinkage reference model is absent "
+            f"from model_order: {reference_model}"
+        )
+
+    alpha_values = tuple(
+        float(value)
+        for value in alpha_grid
+    )
+
+    if not alpha_values:
+        raise ValueError(
+            "alpha_grid must not be empty."
+        )
+
+    if any(
+        (
+            not np.isfinite(value)
+            or value < 0.0
+            or value > 1.0
+        )
+        for value in alpha_values
+    ):
+        raise ValueError(
+            "Every shrinkage alpha must "
+            "lie in [0, 1]."
+        )
+
+    if len(set(alpha_values)) != len(
+        alpha_values
+    ):
+        raise ValueError(
+            "Duplicate shrinkage alpha."
+        )
+
+    importance = np.asarray(
+        fold_importance,
+        dtype=np.float64,
+    )
+
+    if importance.shape != (
+        len(folds),
+    ):
+        raise ValueError(
+            "fold_importance must match folds."
+        )
+
+    if (
+        not np.isfinite(
+            importance
+        ).all()
+        or (
+            importance < 0.0
+        ).any()
+        or importance.sum() <= 0.0
+    ):
+        raise ValueError(
+            "Invalid fold importance."
+        )
+
+    importance = (
+        importance
+        / importance.sum()
+    )
+
+    by_label = {
+        label: folds[index]
+        for index, label
+        in enumerate(labels)
+    }
+
+    # --------------------------------------------------------
+    # Raw temporal optimum.
+    # --------------------------------------------------------
+
+    (
+        raw_optimal_weights,
+        raw_weight_report,
+    ) = select_stable_weights(
+        folds,
+        fold_importance=importance,
+        step=step,
+        model_order=model_order,
+        protected_fold_labels=(
+            protected_fold_labels
+        ),
+        non_degradation_tolerance=(
+            non_degradation_tolerance
+        ),
+    )
+
+    # --------------------------------------------------------
+    # Stable prior = XGBoost one-hot.
+    # --------------------------------------------------------
+
+    reference_weights = np.zeros(
+        len(model_order),
+        dtype=np.float64,
+    )
+
+    reference_index = list(
+        model_order
+    ).index(
+        reference_model
+    )
+
+    reference_weights[
+        reference_index
+    ] = 1.0
+
+    reference_fold_brier = {
+        label: _fold_brier_with_weights(
+            fold,
+            reference_weights,
+            model_order,
+        )
+        for label, fold
+        in by_label.items()
+    }
+
+    candidate_payloads = []
+
+    for alpha in alpha_values:
+        weights = (
+            (
+                1.0 - alpha
+            )
+            * reference_weights
+            + alpha
+            * raw_optimal_weights
+        )
+
+        weights = np.asarray(
+            weights,
+            dtype=np.float64,
+        )
+
+        if not np.isclose(
+            weights.sum(),
+            1.0,
+            atol=1.0e-12,
+        ):
+            raise RuntimeError(
+                "Shrunk ensemble weights "
+                "do not sum to one."
+            )
+
+        fold_brier = {
+            label: _fold_brier_with_weights(
+                fold,
+                weights,
+                model_order,
+            )
+            for label, fold
+            in by_label.items()
+        }
+
+        calibrator = (
+            fit_abs_regime_logit_calibrator(
+                full_2024_fold=(
+                    by_label["2024"]
+                ),
+                late_2024_fold=(
+                    by_label[
+                        "2024_late_abs"
+                    ]
+                ),
+                weights=weights,
+                model_order=model_order,
+                early_month_max=(
+                    early_month_max
+                ),
+            )
+        )
+
+        if calibrator["accepted"]:
+            deployed_late_brier = float(
+                calibrator[
+                    "late_transferred_brier"
+                ]
+            )
+        else:
+            deployed_late_brier = float(
+                fold_brier[
+                    "2024_late_abs"
+                ]
+            )
+
+        objective = float(
+            importance[
+                labels.index("2023")
+            ]
+            * fold_brier["2023"]
+            + importance[
+                labels.index("2024")
+            ]
+            * fold_brier["2024"]
+            + importance[
+                labels.index(
+                    "2024_late_abs"
+                )
+            ]
+            * deployed_late_brier
+        )
+
+        gain_2024_vs_reference = float(
+            reference_fold_brier[
+                "2024"
+            ]
+            - fold_brier["2024"]
+        )
+
+        gain_late_raw_vs_reference = float(
+            reference_fold_brier[
+                "2024_late_abs"
+            ]
+            - fold_brier[
+                "2024_late_abs"
+            ]
+        )
+
+        gain_late_deployed_vs_reference = float(
+            reference_fold_brier[
+                "2024_late_abs"
+            ]
+            - deployed_late_brier
+        )
+
+        feasible = bool(
+            fold_brier["2023"]
+            <= float(
+                maximum_2023_brier
+            )
+            + 1.0e-15
+            and gain_2024_vs_reference
+            + float(
+                non_degradation_tolerance
+            )
+            >= -1.0e-15
+            and gain_late_raw_vs_reference
+            + float(
+                non_degradation_tolerance
+            )
+            >= -1.0e-15
+            and calibrator["accepted"]
+            and float(
+                calibrator[
+                    "transfer_gain"
+                ]
+            )
+            + 1.0e-15
+            >= float(
+                minimum_calibration_transfer_gain
+            )
+        )
+
+        record = {
+            "alpha": float(alpha),
+            "weights": weights.tolist(),
+            "fold_brier": {
+                key: float(value)
+                for key, value
+                in fold_brier.items()
+            },
+            "deployed_late_brier": float(
+                deployed_late_brier
+            ),
+            "forward_weighted_brier": float(
+                objective
+            ),
+            "2024_gain_vs_reference": float(
+                gain_2024_vs_reference
+            ),
+            "late_raw_gain_vs_reference": float(
+                gain_late_raw_vs_reference
+            ),
+            "late_deployed_gain_vs_reference": float(
+                gain_late_deployed_vs_reference
+            ),
+            "calibration_accepted": bool(
+                calibrator["accepted"]
+            ),
+            "calibration_transfer_gain": float(
+                calibrator[
+                    "transfer_gain"
+                ]
+            ),
+            "feasible": bool(
+                feasible
+            ),
+        }
+
+        candidate_payloads.append(
+            (
+                record,
+                weights,
+                calibrator,
+            )
+        )
+
+    feasible_payloads = [
+        payload
+        for payload
+        in candidate_payloads
+        if payload[0]["feasible"]
+    ]
+
+    selection_passed = bool(
+        feasible_payloads
+    )
+
+    selection_pool = (
+        feasible_payloads
+        if feasible_payloads
+        else candidate_payloads
+    )
+
+    # On an effectively identical objective,
+    # prefer stronger shrinkage / smaller alpha.
+    selected_record, selected_weights, (
+        selected_calibrator
+    ) = min(
+        selection_pool,
+        key=lambda payload: (
+            payload[0][
+                "forward_weighted_brier"
+            ],
+            payload[0]["alpha"],
+        ),
+    )
+
+    report = {
+        "method": (
+            "calibration_aware_"
+            "reference_shrinkage"
+        ),
+        "model_order": list(
+            model_order
+        ),
+        "selection_passed": bool(
+            selection_passed
+        ),
+        "reference_model": str(
+            reference_model
+        ),
+        "reference_weights": (
+            reference_weights.tolist()
+        ),
+        "reference_fold_brier": {
+            key: float(value)
+            for key, value
+            in reference_fold_brier.items()
+        },
+        "raw_optimal_weights": (
+            raw_optimal_weights.tolist()
+        ),
+        "raw_weight_selection": (
+            raw_weight_report
+        ),
+        "alpha_grid": list(
+            alpha_values
+        ),
+        "selected_alpha": float(
+            selected_record["alpha"]
+        ),
+        "weights": (
+            selected_weights.tolist()
+        ),
+        "fold_brier": dict(
+            selected_record[
+                "fold_brier"
+            ]
+        ),
+        "deployed_late_brier": float(
+            selected_record[
+                "deployed_late_brier"
+            ]
+        ),
+        "forward_weighted_brier": float(
+            selected_record[
+                "forward_weighted_brier"
+            ]
+        ),
+        "candidates": [
+            payload[0]
+            for payload
+            in candidate_payloads
+        ],
+    }
+
+    return (
+        np.asarray(
+            selected_weights,
+            dtype=np.float64,
+        ),
+        report,
+        selected_calibrator,
+    )

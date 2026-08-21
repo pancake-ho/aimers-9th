@@ -113,6 +113,35 @@ class ConfigContractTests(
             .lgb_num_boost_round,
             0,
         )
+        self.assertEqual(
+            config
+            .ensemble_shrinkage_reference_model,
+            "xgb",
+        )
+
+        self.assertEqual(
+            config
+            .ensemble_shrinkage_alphas,
+            (
+                0.00,
+                0.25,
+                0.50,
+                0.75,
+                1.00,
+            ),
+        )
+
+        self.assertEqual(
+            config
+            .submission_gate_calibration_min_transfer_gain,
+            3.0e-5,
+        )
+
+        self.assertEqual(
+            config
+            .submission_gate_late_calibrated_min_gain_vs_reference,
+            5.0e-5,
+        )
 
     def test_neural_training_can_be_disabled_without_changing_model_defaults(
         self,

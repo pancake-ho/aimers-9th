@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-#SBATCH -J ensemble-v9
+#SBATCH -J ensemble-v10
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-gpu=16
 #SBATCH --mem-per-gpu=29G
@@ -530,7 +530,7 @@ if [[ "${GPU_READY}" -ne 1 ]]; then
 fi
 
 echo "[GPU] Functional CUDA backend confirmed."
-echo "[MODE] xgb+lgb+cat+resnet+ft_transformer temporal_v9"
+echo "[MODE] xgb+lgb+cat+resnet+ft_transformer calibrated-shrink-v10"
 
 
 # ============================================================
@@ -603,6 +603,7 @@ echo "[PREFLIGHT] Exercising source contracts"
         tests.test_trackman_entity_contract \
         tests.test_neural_config_alignment \
         tests.test_neural_contract \
+        tests.test_calibration_shrinkage \
         -q
 )
 
