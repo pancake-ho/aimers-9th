@@ -89,48 +89,85 @@ python --version
 python - <<'PY'
 from importlib.metadata import version
 
-print(f"[ENV] numpy_package={version('numpy')}", flush=True)
-print(f"[ENV] xgboost_package={version('xgboost')}", flush=True)
-print(f"[ENV] torch_package={version('torch')}", flush=True)
-print(f"[ENV] tabdpt_package={version('tabdpt')}", flush=True)
+print(
+    f"[ENV] numpy_package={version('numpy')}",
+    flush=True,
+)
+print(
+    f"[ENV] xgboost_package={version('xgboost')}",
+    flush=True,
+)
+print(
+    f"[ENV] torch_package={version('torch')}",
+    flush=True,
+)
+print(
+    f"[ENV] tabdpt_package={version('tabdpt')}",
+    flush=True,
+)
 
-import numpy
 import torch
 import torch.nn.functional as F
-import xgboost
-from torch.nn.attention import SDPBackend, sdpa_kernel
+import xgboost  # noqa: F401
+import numpy  # noqa: F401
 
-from tabdpt import TabDPTClassifier
+from tabdpt import TabDPTClassifier  # noqa: F401
+from torch.nn.attention import (
+    SDPBackend,
+    sdpa_kernel,
+)
 
-print(f"[ENV] torch={torch.__version__} cuda_build={torch.version.cuda}", flush=True)
+
+print(
+    f"[ENV] torch={torch.__version__} "
+    f"cuda_build={torch.version.cuda}",
+    flush=True,
+)
+
 if version("tabdpt") != "1.2.0":
-    raise RuntimeError(f"Expected tabdpt==1.2.0, got {version('tabdpt')}")
+    raise RuntimeError(
+        "Expected tabdpt==1.2.0, "
+        f"got {version('tabdpt')}"
+    )
+
 if not torch.__version__.startswith("2.6.0"):
-    raise RuntimeError(f"Expected torch 2.6.0, got {torch.__version__}")
+    raise RuntimeError(
+        "Expected torch 2.6.0, "
+        f"got {torch.__version__}"
+    )
+
 if torch.version.cuda != "11.8":
     raise RuntimeError(
-        f"Expected the CUDA 11.8 PyTorch build, got {torch.version.cuda}"
+        "Expected the CUDA 11.8 PyTorch build, "
+        f"got {torch.version.cuda}"
     )
+
 if not torch.cuda.is_available():
     raise RuntimeError(
-        "PyTorch CUDA initialization failed inside the allocated Slurm job. "
-        "Re-run run/setup_tabdpt_env.sh and confirm this job requests --gres=gpu:1."
+        "PyTorch CUDA initialization failed "
+        "inside the allocated Slurm job."
     )
+
 
 device = torch.device("cuda:0")
 
 gpu_name = torch.cuda.get_device_name(0)
-capability = torch.cuda.get_device_capability(0)
-major, minor = capability
+major, minor = torch.cuda.get_device_capability(0)
 
 print(
     f"[GPU] device={gpu_name}",
     flush=True,
 )
+
 print(
     f"[GPU] compute_capability=sm{major}{minor}",
     flush=True,
 )
+
+
+# ------------------------------------------------------------
+# Basic CUDA functional check
+# ------------------------------------------------------------
 
 x = torch.ones(
     (128, 128),
@@ -150,27 +187,34 @@ print(
     flush=True,
 )
 
-# This experiment intentionally keeps the same Flash-Attention
-# inference path as the existing TabDPT temporal baseline.
-#
-# PyTorch's native Flash SDPA used by this environment requires
-# Ampere-or-newer CUDA GPUs (sm80+).  Running the representative
-# context experiment through a non-Flash path would change more
-# than the context-selection variable and weaken the ablation.
+
+# ------------------------------------------------------------
+# Keep the same Flash-Attention path used by the validated
+# TabDPT baseline.  Turing/sm75 nodes are rejected here rather
+# than failing later inside SDPA.
+# ------------------------------------------------------------
+
 if major < 8:
     raise RuntimeError(
-        "This TabDPT temporal ablation requires an "
-        "Ampere-or-newer GPU (compute capability >= 8.0) "
-        "to preserve the validated Flash-Attention path. "
+        "This TabDPT temporal ablation requires "
+        "an Ampere-or-newer GPU "
+        "(compute capability >= 8.0). "
         f"Allocated GPU: {gpu_name}, "
         f"compute capability sm{major}{minor}."
     )
 
-if not torch.backends.cuda.is_flash_attention_available():
-    raise RuntimeError(
-        "PyTorch reports that native Flash Attention "
-        "is unavailable on this CUDA build/GPU."
+if (
+    hasattr(
+        torch.backends.cuda,
+        "is_flash_attention_available",
     )
+    and not torch.backends.cuda.is_flash_attention_available()
+):
+    raise RuntimeError(
+        "PyTorch reports that native Flash "
+        "Attention is unavailable."
+    )
+
 
 query = torch.randn(
     (1, 4, 128, 64),
@@ -189,9 +233,7 @@ with sdpa_kernel(
         )
     )
 
-if not torch.isfinite(
-    attention
-).all():
+if not torch.isfinite(attention).all():
     raise RuntimeError(
         "Flash SDPA produced "
         "non-finite values."
@@ -202,17 +244,16 @@ print(
     flush=True,
 )
 
+
+# ------------------------------------------------------------
+# Cleanup exactly once.
+# ------------------------------------------------------------
+
 del attention
-del product
 del query
+del product
 del x
 
-torch.cuda.empty_cache()
-
-print(f"[GPU] device={torch.cuda.get_device_name(0)}", flush=True)
-print("[GPU] CUDA matmul PASS", flush=True)
-print("[GPU] Flash SDPA PASS", flush=True)
-del attention, product, query, x
 torch.cuda.empty_cache()
 PY
 free -h
