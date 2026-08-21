@@ -140,6 +140,31 @@ class RunScriptContractTests(
             'torch_base_version != "2.5.1"',
             script,
         )
+        
+    def test_dataset_cache_uses_bash_arithmetic_not_subshells(
+        self,
+    ) -> None:
+        script = self._script()
+
+        self.assertIn(
+            "REQUIRED_CACHE_BYTES=$((",
+            script,
+        )
+
+        self.assertIn(
+            "UNCOMPRESSED_BYTES + CACHE_SAFETY_BYTES",
+            script,
+        )
+
+        self.assertIn(
+            "if (( SHARED_FREE_BYTES < REQUIRED_CACHE_BYTES )); then",
+            script,
+        )
+
+        self.assertNotIn(
+            "REQUIRED_CACHE_BYTES=$(\n            (",
+            script,
+        )
 
     def test_gpu_failure_refuses_a_silent_weaker_fallback(
         self,

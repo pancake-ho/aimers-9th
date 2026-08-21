@@ -29,6 +29,7 @@ SHARED_WORK_BASE="/data/${USER}/tmp/aimers_9th"
 # job-local workspace and then copy it again.
 DATA_CACHE_ROOT="/data/${USER}/datasets/aimers_9th/extracted_v1"
 DATA_CACHE_DIR="${DATA_CACHE_ROOT}/data"
+TEMP_CACHE=""
 
 # Keep a generous node-local safety margin for:
 # model checkpoints, XGBoost/CatBoost temporary files, PyTorch caches,
@@ -121,17 +122,46 @@ preserve_diagnostics() {
 cleanup() {
     local exit_code=$?
 
-    # Prevent recursive EXIT trap handling.
+    # Prevent recursive EXIT handling.
     trap - EXIT
 
     preserve_diagnostics || true
 
+
+    # --------------------------------------------------------
+    # Remove an incomplete persistent-cache build owned by
+    # this job only.
+    # --------------------------------------------------------
+    if [[ -n "${TEMP_CACHE:-}" ]]; then
+        if [[ \
+            "${TEMP_CACHE}" == "${DATA_CACHE_ROOT}.tmp-"* \
+            && -d "${TEMP_CACHE}" \
+        ]]; then
+            echo \
+                "[CLEANUP] Removing incomplete dataset cache: " \
+                "${TEMP_CACHE}"
+
+            rm -rf -- "${TEMP_CACHE}"
+        else
+            echo \
+                "[WARN] Refusing to remove unexpected TEMP_CACHE=" \
+                "${TEMP_CACHE}"
+        fi
+    fi
+
+
+    # --------------------------------------------------------
+    # Remove job workspace.
+    # --------------------------------------------------------
     if [[ -n "${JOB_ROOT:-}" ]] && {
         [[ "${JOB_ROOT}" == "${LOCAL_WORK_BASE}"/job-* ]] ||
         [[ "${JOB_ROOT}" == "${SHARED_WORK_BASE}"/job-* ]]
     }; then
         if [[ -d "${JOB_ROOT}" ]]; then
-            echo "[CLEANUP] Removing job workspace: ${JOB_ROOT}"
+            echo \
+                "[CLEANUP] Removing job workspace: " \
+                "${JOB_ROOT}"
+
             rm -rf -- "${JOB_ROOT}"
         fi
     else
@@ -139,6 +169,7 @@ cleanup() {
             "[WARN] Refusing cleanup for unexpected JOB_ROOT=" \
             "${JOB_ROOT:-unset}"
     fi
+
 
     exit "${exit_code}"
 }
@@ -607,23 +638,37 @@ rsync -a \
 # ============================================================
 
 if [[ ! -s "${DATA_ARCHIVE}" ]]; then
-    echo "[ERROR] Dataset archive not found: ${DATA_ARCHIVE}"
+    echo "[ERROR] Dataset archive not found or empty:"
+    echo "        ${DATA_ARCHIVE}"
     exit 74
 fi
 
+
+# The cache is tied to the exact official archive.
 ARCHIVE_SHA256="$(
     sha256sum "${DATA_ARCHIVE}" \
         | awk '{print $1}'
 )"
 
+if [[ ! "${ARCHIVE_SHA256}" =~ ^[0-9a-fA-F]{64}$ ]]; then
+    echo "[ERROR] Failed to compute a valid SHA256 for:"
+    echo "        ${DATA_ARCHIVE}"
+    exit 74
+fi
+
+
 dataset_cache_ready() {
+    local cached_sha
+
     if [[ ! -s "${DATA_CACHE_ROOT}/.archive_sha256" ]]; then
         return 1
     fi
 
-    if [[ "$(
+    cached_sha="$(
         cat "${DATA_CACHE_ROOT}/.archive_sha256"
-    )" != "${ARCHIVE_SHA256}" ]]; then
+    )"
+
+    if [[ "${cached_sha}" != "${ARCHIVE_SHA256}" ]]; then
         return 1
     fi
 
@@ -634,39 +679,78 @@ dataset_cache_ready() {
 if ! dataset_cache_ready; then
     echo "[DATA-CACHE] Cache missing/stale."
 
-    mkdir -p "$(dirname "${DATA_CACHE_ROOT}")"
+    mkdir -p "$(
+        dirname "${DATA_CACHE_ROOT}"
+    )"
 
-    # Avoid two concurrent jobs rebuilding the same cache.
     if ! command -v flock >/dev/null 2>&1; then
         echo "[ERROR] flock is required for safe dataset cache creation."
         exit 75
     fi
 
+    # --------------------------------------------------------
+    # Only one job may construct the persistent cache.
+    # --------------------------------------------------------
     exec 9>"${DATA_CACHE_ROOT}.lock"
     flock 9
 
-    # Another job may have created it while this job waited for the lock.
+    # Another job may have completed the cache while
+    # this job was waiting for the lock.
     if ! dataset_cache_ready; then
         TEMP_CACHE="${DATA_CACHE_ROOT}.tmp-${JOB_ID}"
+
+        echo "[DATA-CACHE] temporary_cache=${TEMP_CACHE}"
 
         rm -rf -- "${TEMP_CACHE}"
         mkdir -p "${TEMP_CACHE}"
 
+
+        # ----------------------------------------------------
+        # Calculate exact uncompressed size of the four
+        # official files that will be extracted.
+        # ----------------------------------------------------
         UNCOMPRESSED_BYTES="$(
             unzip -l "${DATA_ARCHIVE}" \
-            | awk '
-                $4 == "data/train.csv" ||
-                $4 == "data/test.csv" ||
-                $4 == "data/sample_submission.csv" ||
-                $4 == "data/trackman_history.csv"
-                {
-                    total += $1
-                }
-                END {
-                    printf "%.0f\n", total
-                }
-            '
-        )"
+                | awk '
+                    $4 == "data/train.csv" ||
+                    $4 == "data/test.csv" ||
+                    $4 == "data/sample_submission.csv" ||
+                    $4 == "data/trackman_history.csv"
+                    {
+                        total += $1
+                        matched += 1
+                    }
+
+                    END {
+                        if (matched != 4) {
+                            exit 2
+                        }
+
+                        printf "%.0f\n", total
+                    }
+                '
+        )" || {
+            echo "[ERROR] Could not read all four expected files from open.zip."
+            echo "[ERROR] Expected:"
+            echo "        data/train.csv"
+            echo "        data/test.csv"
+            echo "        data/sample_submission.csv"
+            echo "        data/trackman_history.csv"
+            exit 76
+        }
+
+
+        if [[ ! "${UNCOMPRESSED_BYTES}" =~ ^[0-9]+$ ]]; then
+            echo "[ERROR] Invalid UNCOMPRESSED_BYTES:"
+            echo "        ${UNCOMPRESSED_BYTES}"
+            exit 76
+        fi
+
+        if (( UNCOMPRESSED_BYTES <= 0 )); then
+            echo "[ERROR] Dataset uncompressed size is zero."
+            exit 76
+        fi
+
 
         CACHE_PARENT="$(
             dirname "${DATA_CACHE_ROOT}"
@@ -676,38 +760,49 @@ if ! dataset_cache_ready; then
             free_bytes "${CACHE_PARENT}"
         )"
 
+
+        if [[ ! "${SHARED_FREE_BYTES}" =~ ^[0-9]+$ ]]; then
+            echo "[ERROR] Invalid SHARED_FREE_BYTES:"
+            echo "        ${SHARED_FREE_BYTES}"
+            exit 76
+        fi
+
+
+        # Keep 1 GiB spare beyond the extracted CSV sizes.
         CACHE_SAFETY_BYTES=$((1024 * 1024 * 1024))
 
-        REQUIRED_CACHE_BYTES=$(
-            (
-                UNCOMPRESSED_BYTES
-                + CACHE_SAFETY_BYTES
-            )
-        )
+        # IMPORTANT:
+        # $(( ... )) is arithmetic expansion.
+        # Do not replace this with $( ... ), which is command substitution.
+        REQUIRED_CACHE_BYTES=$(( \
+            UNCOMPRESSED_BYTES + CACHE_SAFETY_BYTES \
+        ))
 
-        echo \
-            "[DATA-CACHE] uncompressed_bytes=" \
-            "${UNCOMPRESSED_BYTES}"
 
-        echo \
-            "[DATA-CACHE] shared_free_bytes=" \
-            "${SHARED_FREE_BYTES}"
+        echo "[DATA-CACHE] uncompressed_bytes=${UNCOMPRESSED_BYTES}"
+        echo "[DATA-CACHE] safety_bytes=${CACHE_SAFETY_BYTES}"
+        echo "[DATA-CACHE] required_bytes=${REQUIRED_CACHE_BYTES}"
+        echo "[DATA-CACHE] shared_free_bytes=${SHARED_FREE_BYTES}"
 
-        if (
-            SHARED_FREE_BYTES
-            < REQUIRED_CACHE_BYTES
-        ); then
-            echo \
-                "[ERROR] Not enough /data space to create dataset cache."
+
+        # IMPORTANT:
+        # (( ... )) is Bash arithmetic evaluation.
+        # A plain (...) would create a subshell instead.
+        if (( SHARED_FREE_BYTES < REQUIRED_CACHE_BYTES )); then
+            echo "[ERROR] Not enough /data space to create dataset cache."
             echo \
                 "[ERROR] required=${REQUIRED_CACHE_BYTES} " \
                 "available=${SHARED_FREE_BYTES}"
             exit 76
         fi
 
-        echo \
-            "[DATA-CACHE] Extracting official files directly from:" \
-            "${DATA_ARCHIVE}"
+
+        # ----------------------------------------------------
+        # Extract only the four official files we need.
+        # No open.zip copy and no second CSV copy.
+        # ----------------------------------------------------
+        echo "[DATA-CACHE] Extracting official files from:"
+        echo "             ${DATA_ARCHIVE}"
 
         unzip -q \
             "${DATA_ARCHIVE}" \
@@ -717,20 +812,31 @@ if ! dataset_cache_ready; then
             "data/trackman_history.csv" \
             -d "${TEMP_CACHE}"
 
+
         if ! validate_data_dir "${TEMP_CACHE}/data"; then
             echo "[ERROR] Extracted dataset cache is incomplete."
             exit 77
         fi
 
+
         printf '%s\n' \
             "${ARCHIVE_SHA256}" \
             > "${TEMP_CACHE}/.archive_sha256"
 
-        # Replace only after the new cache is complete.
+
+        # ----------------------------------------------------
+        # Atomic-ish publish:
+        # only expose DATA_CACHE_ROOT after the full cache
+        # passed validation.
+        # ----------------------------------------------------
         rm -rf -- "${DATA_CACHE_ROOT}"
+
         mv -- \
             "${TEMP_CACHE}" \
             "${DATA_CACHE_ROOT}"
+
+        # The temporary directory no longer exists after mv.
+        TEMP_CACHE=""
 
         echo "[DATA-CACHE] Cache created successfully."
     else
@@ -739,15 +845,21 @@ if ! dataset_cache_ready; then
 
     flock -u 9
     exec 9>&-
+
 else
     echo "[DATA-CACHE] Reusing validated persistent cache."
 fi
 
 
+# ============================================================
+# Final cache validation
+# ============================================================
+
 if ! validate_data_dir "${DATA_CACHE_DIR}"; then
     echo "[ERROR] Final dataset cache validation failed."
     exit 78
 fi
+
 
 export AIMERS_DATA_DIR="${DATA_CACHE_DIR}"
 
@@ -761,10 +873,10 @@ for filename in \
 do
     data_path="${AIMERS_DATA_DIR}/${filename}"
 
-    echo \
-        "[DATA] " \
-        "$(du -h "${data_path}")"
+    echo "[DATA] $(du -h "${data_path}")"
 done
+
+
 
 
 # ============================================================
