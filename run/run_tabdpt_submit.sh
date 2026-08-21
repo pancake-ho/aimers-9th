@@ -44,7 +44,7 @@ trap cleanup EXIT
 
 echo "============================================================"
 echo "[JOB] id=${JOB_ID} host=$(hostname)"
-echo "[JOB] experiment=recent_context_tabdpt_turbo_xgb_v1"
+echo "[JOB] experiment=representative_context_tabdpt_turbo_xgb_v1"
 echo "============================================================"
 
 if [[ "$(hostname -s)" == *-master ]]; then
@@ -197,6 +197,7 @@ python scripts/train_tabdpt_submit.py \
     --model-weight-path "${TABDPT_WEIGHT_LOCAL}" \
     --xgb-device cuda \
     --tabdpt-device cuda \
+    --context-strategy representative_v1 \
     --context-size 32768 \
     --n-ensembles 2 \
     --inference-batch-size 65536

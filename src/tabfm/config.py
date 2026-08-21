@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 
 
@@ -39,9 +40,7 @@ class TabDPTExperimentConfig:
     minimum_2024_blend_gain: float = 3.0e-5
     minimum_late_blend_gain: float = 3.0e-5
 
-    context_strategy: str = (
-    "representative_v1"
-    )
+    context_strategy: str = "representative_v1"
 
     representative_recent_fraction: float = 0.70
     representative_pitcher_fraction: float = 0.20
@@ -77,15 +76,58 @@ class TabDPTExperimentConfig:
                 f"{self.context_strategy}"
             )
 
+        if self.minimum_2024_blend_gain < 0.0:
+            raise ValueError(
+                "minimum_2024_blend_gain "
+                "must be non-negative."
+            )
+
+        if self.minimum_late_blend_gain < 0.0:
+            raise ValueError(
+                "minimum_late_blend_gain "
+                "must be non-negative."
+            )
+
+        if self.context_strategy not in {
+            "recent_proportional",
+            "representative_v1",
+        }:
+            raise ValueError(
+                "Unsupported TabDPT context strategy: "
+                f"{self.context_strategy}"
+            )
+
         context_fractions = (
-            self.representative_recent_fraction
-            + self.representative_pitcher_fraction
-            + self.representative_situation_fraction
+            float(
+                self.representative_recent_fraction
+            ),
+            float(
+                self.representative_pitcher_fraction
+            ),
+            float(
+                self.representative_situation_fraction
+            ),
         )
 
-        if not abs(
-            context_fractions - 1.0
-        ) <= 1e-9:
+        if any(
+            (
+                not math.isfinite(value)
+                or value < 0.0
+                or value > 1.0
+            )
+            for value in context_fractions
+        ):
+            raise ValueError(
+                "Representative context fractions "
+                "must each lie in [0, 1]."
+            )
+
+        if not math.isclose(
+            sum(context_fractions),
+            1.0,
+            rel_tol=0.0,
+            abs_tol=1.0e-9,
+        ):
             raise ValueError(
                 "Representative context fractions "
                 "must sum to one."

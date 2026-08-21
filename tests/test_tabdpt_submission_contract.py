@@ -40,6 +40,48 @@ class TabDPTSubmissionContractTests(unittest.TestCase):
             '"model/manifest.json"',
         ):
             self.assertIn(name, source)
+    
+    def test_material_forward_gain_gates_are_enforced(
+        self,
+    ) -> None:
+        source = (
+            ROOT
+            / "src"
+            / "tabfm"
+            / "training.py"
+        ).read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn(
+            "minimum_2024_blend_gain",
+            source,
+        )
+
+        self.assertIn(
+            "minimum_late_blend_gain",
+            source,
+        )
+
+        self.assertIn(
+            '"2024_material_blend_gain"',
+            source,
+        )
+
+        self.assertIn(
+            '"late_material_blend_gain"',
+            source,
+        )
+
+        self.assertIn(
+            '"2024_blend_gain"',
+            source,
+        )
+
+        self.assertIn(
+            '"late_blend_gain"',
+            source,
+        )
 
 
 if __name__ == "__main__":

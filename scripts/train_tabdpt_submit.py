@@ -41,6 +41,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--context-size", type=int, default=32_768)
     parser.add_argument("--n-ensembles", type=int, default=2)
     parser.add_argument("--inference-batch-size", type=int, default=65_536)
+    parser.add_argument(
+        "--context-strategy",
+        choices=(
+            "recent_proportional",
+            "representative_v1",
+        ),
+        default="representative_v1",
+    )
     return parser.parse_args()
 
 
@@ -52,10 +60,32 @@ def main() -> None:
         models=ModelConfig(xgb_device=args.xgb_device),
         neural=NeuralConfig(enabled=False),
     )
-    tabdpt_config = TabDPTExperimentConfig(
-        context_size=args.context_size,
-        n_ensembles=args.n_ensembles,
-        inference_batch_size=args.inference_batch_size,
+    tabdpt_config = (
+        TabDPTExperimentConfig(
+            context_size=(
+                args.context_size
+            ),
+            n_ensembles=(
+                args.n_ensembles
+            ),
+            inference_batch_size=(
+                args.inference_batch_size
+            ),
+            context_strategy=(
+                args.context_strategy
+            ),
+        )
+    )
+    print(
+        "[CONFIG] "
+        f"context_strategy="
+        f"{tabdpt_config.context_strategy} "
+        f"context_size="
+        f"{tabdpt_config.context_size} "
+        f"fractions=("
+        f"{tabdpt_config.representative_recent_fraction:.2f},"
+        f"{tabdpt_config.representative_pitcher_fraction:.2f},"
+        f"{tabdpt_config.representative_situation_fraction:.2f})"
     )
     tabdpt_config.validate()
     validate_feature_config_contract(experiment_config.features)

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import gc
+import os
 import hashlib
 import json
 import shutil
@@ -194,6 +195,66 @@ def run_tabdpt_temporal_validation(
         context_y = train.iloc[context_global][target_col].to_numpy(
             dtype=np.int64, copy=True
         )
+        context_season = int(
+            pd.to_numeric(
+                train.iloc[
+                    context_global
+                ]["season"],
+                errors="raise",
+            ).max()
+        )
+
+        fold_train_frame = (
+            train.iloc[
+                fold.train_idx
+            ]
+        )
+
+        fold_train_season = (
+            pd.to_numeric(
+                fold_train_frame[
+                    "season"
+                ],
+                errors="raise",
+            ).to_numpy(
+                dtype=np.int64,
+            )
+        )
+
+        latest_pool_mask = (
+            fold_train_season
+            == context_season
+        )
+
+        context_pool_target_mean = float(
+            pd.to_numeric(
+                fold_train_frame.iloc[
+                    np.flatnonzero(
+                        latest_pool_mask
+                    )
+                ][target_col],
+                errors="raise",
+            ).mean()
+        )
+
+        context_target_mean = float(
+            context_y.mean()
+        )
+
+        context_target_rate_delta = float(
+            context_target_mean
+            - context_pool_target_mean
+        )
+
+        print(
+            "[TABDPT-CONTEXT-AUDIT] "
+            f"pool_target_mean="
+            f"{context_pool_target_mean:.8f} "
+            f"context_target_mean="
+            f"{context_target_mean:.8f} "
+            f"delta="
+            f"{context_target_rate_delta:+.8f}"
+        )
         query_x = to_tabdpt_array(X_valid, feature_names)
         start = time.perf_counter()
         tabdpt_prediction = predict_tabdpt(
@@ -239,6 +300,15 @@ def run_tabdpt_temporal_validation(
                 "predictions": predictions,
                 "metrics": metrics,
                 "best_iterations": {"xgb": int(best_iteration)},
+                "context_target_mean": (
+                    context_target_mean
+                ),
+                "context_pool_target_mean": (
+                    context_pool_target_mean
+                ),
+                "context_target_rate_delta": (
+                    context_target_rate_delta
+                ),
             }
         )
         del X_train, X_valid, context_x, context_y, query_x, y_train
@@ -295,6 +365,9 @@ def run_tabdpt_temporal_validation(
                     "context_season",
                     "best_iterations",
                     "metrics",
+                    "context_target_mean",
+                    "context_pool_target_mean",
+                    "context_target_rate_delta",
                 )
             }
             | {
@@ -308,36 +381,119 @@ def run_tabdpt_temporal_validation(
     weighted_xgb = float(np.dot(importance, np.asarray(xgb_scores)))
     weighted_blend = float(np.dot(importance, np.asarray(blend_scores)))
     weighted_gain = weighted_xgb - weighted_blend
-    labels = [str(fold["validation_label"]) for fold in fold_results]
+    
+    labels = [
+        str(
+            fold["validation_label"]
+        )
+        for fold in fold_results
+    ]
+
+    full_2024_index = labels.index(
+        "2024"
+    )
+
+    late_index = labels.index(
+        "2024_late_abs"
+    )
+
+    full_2024_blend_gain = float(
+        xgb_scores[full_2024_index]
+        - blend_scores[full_2024_index]
+    )
+
+    late_blend_gain = float(
+        xgb_scores[late_index]
+        - blend_scores[late_index]
+    )
+
     protected_checks = {
-        label: bool(blend_scores[labels.index(label)] <= xgb_scores[labels.index(label)] + 1e-15)
-        for label in tabdpt_config.protected_folds
+        label: bool(
+            blend_scores[
+                labels.index(label)
+            ]
+            <= xgb_scores[
+                labels.index(label)
+            ]
+            + 1.0e-15
+        )
+        for label
+        in tabdpt_config.protected_folds
     }
-    late_index = labels.index("2024_late_abs")
+
     calibration_late_safe = bool(
         not calibrator["accepted"]
-        or packaged_scores[late_index] <= blend_scores[late_index] + 1e-15
+        or packaged_scores[late_index]
+        <= blend_scores[late_index]
+        + 1.0e-15
     )
-    tabdpt_weight = float(weights[TABDPT_MODEL_ORDER.index("tabdpt")])
+
+    tabdpt_weight = float(
+        weights[
+            TABDPT_MODEL_ORDER.index(
+                "tabdpt"
+            )
+        ]
+    )
+
     full_2024_tabdpt_seconds = float(
-        fold_results[1]["metrics"]["tabdpt"]["predict_seconds"]
+        fold_results[
+            full_2024_index
+        ]["metrics"]["tabdpt"][
+            "predict_seconds"
+        ]
     )
+
     estimated_l4_seconds = (
-        full_2024_tabdpt_seconds * tabdpt_config.l4_runtime_multiplier
+        full_2024_tabdpt_seconds
+        * tabdpt_config.l4_runtime_multiplier
         + tabdpt_config.non_tabdpt_runtime_reserve_seconds
     )
+
     checks = {
         "tabdpt_has_material_weight": (
-            tabdpt_weight + 1e-15 >= tabdpt_config.minimum_tabdpt_weight
+            tabdpt_weight
+            + 1.0e-15
+            >= tabdpt_config.minimum_tabdpt_weight
         ),
-        "weighted_gain": weighted_gain + 1e-15 >= tabdpt_config.minimum_weighted_gain,
-        "2023_guard": blend_scores[0] <= tabdpt_config.maximum_2023_brier,
+
+        "weighted_gain": (
+            weighted_gain
+            + 1.0e-15
+            >= tabdpt_config.minimum_weighted_gain
+        ),
+
+        "2024_material_blend_gain": (
+            full_2024_blend_gain
+            + 1.0e-15
+            >= tabdpt_config.minimum_2024_blend_gain
+        ),
+
+        "late_material_blend_gain": (
+            late_blend_gain
+            + 1.0e-15
+            >= tabdpt_config.minimum_late_blend_gain
+        ),
+
+        "2023_guard": (
+            blend_scores[0]
+            <= tabdpt_config.maximum_2023_brier
+        ),
+
         "estimated_l4_runtime": (
             estimated_l4_seconds
             <= tabdpt_config.maximum_estimated_runtime_seconds
         ),
-        "calibration_late_transfer": calibration_late_safe,
-        **{f"non_degradation_{key}": value for key, value in protected_checks.items()},
+
+        "calibration_late_transfer": (
+            calibration_late_safe
+        ),
+
+        **{
+            f"non_degradation_{key}": value
+            for key, value
+            in protected_checks.items()
+        },
     }
     gate = {
         "passed": bool(all(checks.values())),
@@ -352,6 +508,13 @@ def run_tabdpt_temporal_validation(
             "fold_xgb_brier": xgb_scores,
             "fold_blend_brier": blend_scores,
             "fold_packaged_brier": packaged_scores,
+            "2024_blend_gain": (
+                full_2024_blend_gain
+            ),
+
+            "late_blend_gain": (
+                late_blend_gain
+            ),
         },
         "thresholds": {
             "minimum_tabdpt_weight": tabdpt_config.minimum_tabdpt_weight,
@@ -363,6 +526,13 @@ def run_tabdpt_temporal_validation(
             ),
             "maximum_estimated_runtime_seconds": (
                 tabdpt_config.maximum_estimated_runtime_seconds
+            ),
+            "minimum_2024_blend_gain": (
+                tabdpt_config.minimum_2024_blend_gain
+            ),
+
+            "minimum_late_blend_gain": (
+                tabdpt_config.minimum_late_blend_gain
             ),
         },
     }
@@ -450,9 +620,41 @@ def train_and_save_tabdpt_candidate(
         feature_names=np.asarray(feature_names),
     )
 
-    source_checkpoint = validate_tabdpt_weight(source_weight_path)
-    checkpoint_path = model_dir / "tabdpt1_2.safetensors"
-    shutil.copy2(source_checkpoint, checkpoint_path)
+    source_checkpoint = (
+        validate_tabdpt_weight(
+            source_weight_path
+        )
+    )
+
+    checkpoint_path = (
+        model_dir
+        / "tabdpt1_2.safetensors"
+    )
+
+    if checkpoint_path.exists():
+        checkpoint_path.unlink()
+
+    try:
+        os.link(
+            source_checkpoint,
+            checkpoint_path,
+        )
+
+        print(
+            "[FINAL] TabDPT checkpoint "
+            "hard-linked into model bundle."
+        )
+
+    except OSError:
+        shutil.copy2(
+            source_checkpoint,
+            checkpoint_path,
+        )
+
+        print(
+            "[FINAL] TabDPT checkpoint "
+            "copied into model bundle."
+        )
 
     raw_feature_cols = [col for col in train.columns if col != target_col]
     bundle = {

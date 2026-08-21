@@ -4,8 +4,8 @@ import unittest
 
 import numpy as np
 import pandas as pd
-import math
 
+from dataclasses import replace
 from src.tabfm.config import TabDPTExperimentConfig
 from src.tabfm.context import (
     select_recent_context_indices,
@@ -203,31 +203,77 @@ class TabDPTContextTests(unittest.TestCase):
         self.assertEqual(array.dtype, np.float32)
         self.assertEqual(array.shape, (1, 2))
 
-    def test_config_matches_l4_safety_contract(self):
+    def test_config_matches_l4_safety_contract(
+        self,
+    ) -> None:
         config = TabDPTExperimentConfig()
+
         config.validate()
-        context_fractions = (
-            self.representative_recent_fraction,
-            self.representative_pitcher_fraction,
-            self.representative_situation_fraction,
+
+        self.assertEqual(
+            config.context_size,
+            32_768,
         )
 
-        if any(
+        self.assertLessEqual(
+            config.max_features,
+            128,
+        )
+
+        self.assertFalse(
+            config.compile_model
+        )
+
+        self.assertEqual(
+            config.context_strategy,
+            "representative_v1",
+        )
+
+        self.assertAlmostEqual(
             (
-                not math.isfinite(value)
-                or value < 0.0
-                or value > 1.0
-            )
-            for value in context_fractions
-        ):
-            raise ValueError(
-                "Representative context fractions "
-                "must each lie in [0, 1]."
-            )
-        
-        self.assertEqual(config.context_size, 32_768)
-        self.assertLessEqual(config.max_features, 128)
-        self.assertFalse(config.compile_model)
+                config.representative_recent_fraction
+                + config.representative_pitcher_fraction
+                + config.representative_situation_fraction
+            ),
+            1.0,
+            places=12,
+        )
+
+        self.assertEqual(
+            config.minimum_2024_blend_gain,
+            3.0e-5,
+        )
+
+        self.assertEqual(
+            config.minimum_late_blend_gain,
+            3.0e-5,
+        )
+
+    def test_config_rejects_invalid_context_fractions(
+        self,
+    ) -> None:
+        config = TabDPTExperimentConfig()
+
+        invalid = replace(
+            config,
+            representative_recent_fraction=1.10,
+            representative_pitcher_fraction=-0.10,
+            representative_situation_fraction=0.00,
+        )
+
+        with self.assertRaises(ValueError):
+            invalid.validate()
+
+    def test_config_rejects_negative_material_gain(
+        self,
+    ) -> None:
+        config = replace(
+            TabDPTExperimentConfig(),
+            minimum_2024_blend_gain=-1.0e-6,
+        )
+
+        with self.assertRaises(ValueError):
+            config.validate()
 
 
 if __name__ == "__main__":
