@@ -48,6 +48,48 @@ class RunScriptContractTests(
             script,
         )
 
+    def test_dataset_staging_does_not_duplicate_archive_and_csvs(
+        self,
+    ) -> None:
+        script = self._script()
+
+        # Training must consume the immutable extracted data cache
+        # through the existing configuration contract.
+        self.assertIn(
+            'export AIMERS_DATA_DIR="${DATA_CACHE_DIR}"',
+            script,
+        )
+
+        # Do not recreate the old high-disk-footprint pipeline:
+        #
+        # open.zip copy
+        # -> extracted copy
+        # -> baseline/data second copy
+        self.assertNotIn(
+            'cp -- "${DATA_ARCHIVE}" "${LOCAL_JOB_ROOT}/open.zip"',
+            script,
+        )
+
+        self.assertNotIn(
+            'rsync -a "${LOCAL_JOB_ROOT}/open/data/"',
+            script,
+        )
+
+        self.assertIn(
+            "MIN_LOCAL_FREE_BYTES",
+            script,
+        )
+
+        self.assertIn(
+            "shared-fallback",
+            script,
+        )
+
+        self.assertIn(
+            "dataset_cache_ready",
+            script,
+        )
+
     def test_cuda_driver_is_probed_before_data_staging(
         self,
     ) -> None:
