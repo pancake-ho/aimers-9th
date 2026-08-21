@@ -706,36 +706,85 @@ if ! dataset_cache_ready; then
 
 
         # ----------------------------------------------------
-        # Calculate exact uncompressed size of the four
-        # official files that will be extracted.
+        # Validate archive structure and compute exact
+        # uncompressed bytes using Python's zipfile module.
+        #
+        # Do not parse `unzip -l` with awk:
+        # its human-readable output is unnecessarily brittle.
         # ----------------------------------------------------
+
         UNCOMPRESSED_BYTES="$(
-            unzip -l "${DATA_ARCHIVE}" \
-                | awk '
-                    $4 == "data/train.csv" ||
-                    $4 == "data/test.csv" ||
-                    $4 == "data/sample_submission.csv" ||
-                    $4 == "data/trackman_history.csv"
-                    {
-                        total += $1
-                        matched += 1
-                    }
+            python - "${DATA_ARCHIVE}" <<'PY'
+from __future__ import annotations
 
-                    END {
-                        if (matched != 4) {
-                            exit 2
-                        }
+import sys
+import zipfile
+from pathlib import Path
 
-                        printf "%.0f\n", total
-                    }
-                '
+
+archive_path = Path(sys.argv[1])
+
+expected_members = (
+    "data/train.csv",
+    "data/test.csv",
+    "data/sample_submission.csv",
+    "data/trackman_history.csv",
+)
+
+
+try:
+    with zipfile.ZipFile(archive_path, "r") as archive:
+        names = set(archive.namelist())
+
+        missing = [
+            name
+            for name in expected_members
+            if name not in names
+        ]
+
+        if missing:
+            print(
+                "[ARCHIVE-ERROR] Missing expected members:",
+                file=sys.stderr,
+            )
+
+            for name in missing:
+                print(
+                    f"  - {name}",
+                    file=sys.stderr,
+                )
+
+            print(
+                "[ARCHIVE-ERROR] Actual archive members:",
+                file=sys.stderr,
+            )
+
+            for name in sorted(names):
+                print(
+                    f"  - {name}",
+                    file=sys.stderr,
+                )
+
+            raise SystemExit(2)
+
+        total_bytes = sum(
+            archive.getinfo(name).file_size
+            for name in expected_members
+        )
+
+except zipfile.BadZipFile as exc:
+    print(
+        f"[ARCHIVE-ERROR] Invalid zip archive: {exc}",
+        file=sys.stderr,
+    )
+    raise SystemExit(3)
+
+
+print(total_bytes)
+PY
         )" || {
-            echo "[ERROR] Could not read all four expected files from open.zip."
-            echo "[ERROR] Expected:"
-            echo "        data/train.csv"
-            echo "        data/test.csv"
-            echo "        data/sample_submission.csv"
-            echo "        data/trackman_history.csv"
+            echo "[ERROR] Dataset archive validation failed."
+            echo "[ERROR] archive=${DATA_ARCHIVE}"
             exit 76
         }
 
@@ -745,6 +794,7 @@ if ! dataset_cache_ready; then
             echo "        ${UNCOMPRESSED_BYTES}"
             exit 76
         fi
+
 
         if (( UNCOMPRESSED_BYTES <= 0 )); then
             echo "[ERROR] Dataset uncompressed size is zero."
@@ -768,14 +818,12 @@ if ! dataset_cache_ready; then
         fi
 
 
-        # Keep 1 GiB spare beyond the extracted CSV sizes.
+        # Keep 1 GiB spare beyond the extracted dataset.
         CACHE_SAFETY_BYTES=$((1024 * 1024 * 1024))
 
-        # IMPORTANT:
-        # $(( ... )) is arithmetic expansion.
-        # Do not replace this with $( ... ), which is command substitution.
-        REQUIRED_CACHE_BYTES=$(( \
-            UNCOMPRESSED_BYTES + CACHE_SAFETY_BYTES \
+        REQUIRED_CACHE_BYTES=$((
+            UNCOMPRESSED_BYTES
+            + CACHE_SAFETY_BYTES
         ))
 
 
@@ -785,9 +833,6 @@ if ! dataset_cache_ready; then
         echo "[DATA-CACHE] shared_free_bytes=${SHARED_FREE_BYTES}"
 
 
-        # IMPORTANT:
-        # (( ... )) is Bash arithmetic evaluation.
-        # A plain (...) would create a subshell instead.
         if (( SHARED_FREE_BYTES < REQUIRED_CACHE_BYTES )); then
             echo "[ERROR] Not enough /data space to create dataset cache."
             echo \
@@ -798,19 +843,70 @@ if ! dataset_cache_ready; then
 
 
         # ----------------------------------------------------
-        # Extract only the four official files we need.
-        # No open.zip copy and no second CSV copy.
+        # Extract only the four required official files.
+        #
+        # Again use zipfile instead of another shell-level
+        # archive parser so validation and extraction share
+        # exactly the same member contract.
         # ----------------------------------------------------
+
         echo "[DATA-CACHE] Extracting official files from:"
         echo "             ${DATA_ARCHIVE}"
 
-        unzip -q \
+        python - \
             "${DATA_ARCHIVE}" \
-            "data/train.csv" \
-            "data/test.csv" \
-            "data/sample_submission.csv" \
-            "data/trackman_history.csv" \
-            -d "${TEMP_CACHE}"
+            "${TEMP_CACHE}" <<'PY'
+from __future__ import annotations
+
+import sys
+import zipfile
+from pathlib import Path
+
+
+archive_path = Path(sys.argv[1])
+destination = Path(sys.argv[2])
+
+expected_members = (
+    "data/train.csv",
+    "data/test.csv",
+    "data/sample_submission.csv",
+    "data/trackman_history.csv",
+)
+
+
+try:
+    with zipfile.ZipFile(archive_path, "r") as archive:
+        names = set(archive.namelist())
+
+        missing = [
+            name
+            for name in expected_members
+            if name not in names
+        ]
+
+        if missing:
+            raise RuntimeError(
+                "Archive changed between validation and extraction: "
+                f"missing={missing}"
+            )
+
+        for member in expected_members:
+            archive.extract(
+                member,
+                path=destination,
+            )
+
+except zipfile.BadZipFile as exc:
+    raise RuntimeError(
+        f"Invalid zip archive: {archive_path}"
+    ) from exc
+
+
+print(
+    "[DATA-CACHE] extraction PASS "
+    f"destination={destination}"
+)
+PY
 
 
         if ! validate_data_dir "${TEMP_CACHE}/data"; then

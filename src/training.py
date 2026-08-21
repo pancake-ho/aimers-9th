@@ -521,9 +521,16 @@ def run_temporal_validation(
         "calibration_transfer_metrics": transfer_metrics,
         "final_iterations": final_iterations,
     }
-    by_label = {item["validation_label"]: item for item in fold_summaries}
-    guard_2023 = float(by_label["2023"]["ensemble"]["brier"])
-    anchor_2024_raw = float(by_label["2024"]["ensemble"]["brier"])
+    by_label = {
+        item["validation_label"]: item
+        for item in fold_summaries
+    }
+
+
+    # --------------------------------------------------------
+    # Temporal submission-gate metrics
+    # --------------------------------------------------------
+
     guard_2023 = float(
         by_label["2023"][
             "ensemble"
@@ -536,49 +543,64 @@ def run_temporal_validation(
         ]["brier"]
     )
 
-    late = (
+
+    late_summary = (
         by_label[
             "2024_late_abs"
         ]
     )
 
-    late_ensemble = float(
-        late["ensemble"]["brier"]
+    late_raw_brier = float(
+        late_summary[
+            "ensemble"
+        ]["brier"]
     )
 
     late_transferred_brier = float(
-        transfer_metrics["brier"]
+        transfer_metrics[
+            "brier"
+        ]
     )
 
     late_best_component = min(
-        float(metrics["brier"])
+        float(
+            metrics["brier"]
+        )
         for metrics
-        in late["models"].values()
+        in late_summary[
+            "models"
+        ].values()
     )
 
-    late_blend_gain = (
+    late_blend_gain = float(
         late_best_component
-        - late_ensemble
+        - late_raw_brier
     )
-    # Use the calibrated score only when the intercept was estimated on 2023
-    # and improved 2024 without seeing 2024 labels. This is a genuine
-    # one-season-forward result, not in-fold calibration.
-    anchor_2024 = float(
-        by_label["2024"]["ensemble"]["brier"]
-    )
-    late = by_label["2024_late_abs"]
-    late_ensemble = float(late["ensemble"]["brier"])
-    late_best_component = min(
-        float(metrics["brier"]) for metrics in late["models"].values()
-    )
-    late_blend_gain = late_best_component - late_ensemble
+
+
+    # --------------------------------------------------------
+    # Optional Trackman entity-resolution gate
+    #
+    # Currently production has entity resolution disabled,
+    # therefore these remain None.
+    # --------------------------------------------------------
+
     entity_2024_gain = (
-        float(by_label["2024"]["entity_ablation"]["brier_gain"])
+        float(
+            by_label["2024"][
+                "entity_ablation"
+            ]["brier_gain"]
+        )
         if entity_gate_required
         else None
     )
+
     entity_late_gain = (
-        float(late["entity_ablation"]["brier_gain"])
+        float(
+            late_summary[
+                "entity_ablation"
+            ]["brier_gain"]
+        )
         if entity_gate_required
         else None
     )
@@ -626,7 +648,7 @@ def run_temporal_validation(
             "2024_gate_uses_calibration": False,
 
             "2024_late_raw_brier": (
-                late_ensemble
+                late_raw_brier
             ),
             "2024_late_transferred_brier": (
                 late_transferred_brier

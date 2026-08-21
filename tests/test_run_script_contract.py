@@ -140,29 +140,115 @@ class RunScriptContractTests(
             'torch_base_version != "2.5.1"',
             script,
         )
-        
+
     def test_dataset_cache_uses_bash_arithmetic_not_subshells(
         self,
     ) -> None:
         script = self._script()
 
-        self.assertIn(
-            "REQUIRED_CACHE_BYTES=$((",
-            script,
+        # Normalize formatting-only whitespace.
+        #
+        # Shell arithmetic remains equivalent whether operands are written
+        # on one line or split over several lines.  This test should protect
+        # semantics, not code formatting.
+        normalized = " ".join(
+            script.split()
         )
 
+        # Correct arithmetic expansion:
+        #
+        # REQUIRED_CACHE_BYTES=$((
+        #     UNCOMPRESSED_BYTES
+        #     + CACHE_SAFETY_BYTES
+        # ))
         self.assertIn(
-            "UNCOMPRESSED_BYTES + CACHE_SAFETY_BYTES",
-            script,
+            (
+                "REQUIRED_CACHE_BYTES=$(( "
+                "UNCOMPRESSED_BYTES "
+                "+ CACHE_SAFETY_BYTES "
+                "))"
+            ),
+            normalized,
         )
 
+        # Correct arithmetic conditional.
         self.assertIn(
-            "if (( SHARED_FREE_BYTES < REQUIRED_CACHE_BYTES )); then",
-            script,
+            (
+                "if (( "
+                "SHARED_FREE_BYTES "
+                "< REQUIRED_CACHE_BYTES "
+                ")); then"
+            ),
+            normalized,
         )
 
+        # Regression guard for the original job-136323 bug:
+        #
+        # $(...) is command substitution, whereas
+        # $((...)) is arithmetic expansion.
         self.assertNotIn(
-            "REQUIRED_CACHE_BYTES=$(\n            (",
+            (
+                "REQUIRED_CACHE_BYTES=$( ( "
+                "UNCOMPRESSED_BYTES "
+                "+ CACHE_SAFETY_BYTES "
+                ") )"
+            ),
+            normalized,
+        )
+    
+    def test_dataset_archive_contract_uses_python_zipfile(
+        self,
+    ) -> None:
+        script = self._script()
+
+        # Human-readable `unzip -l` output must not be parsed
+        # to determine whether the official data files exist.
+        self.assertNotIn(
+            'unzip -l "${DATA_ARCHIVE}"',
+            script,
+        )
+
+        # Archive validation/extraction must use Python's
+        # deterministic standard-library ZIP API.
+        self.assertIn(
+            "import zipfile",
+            script,
+        )
+
+        self.assertIn(
+            "zipfile.ZipFile",
+            script,
+        )
+
+        self.assertIn(
+            "archive.getinfo(name).file_size",
+            script,
+        )
+
+        self.assertIn(
+            '"data/train.csv"',
+            script,
+        )
+
+        self.assertIn(
+            '"data/test.csv"',
+            script,
+        )
+
+        self.assertIn(
+            '"data/sample_submission.csv"',
+            script,
+        )
+
+        self.assertIn(
+            '"data/trackman_history.csv"',
+            script,
+        )
+
+        # Extraction should only publish a cache after the
+        # four official files were checked.
+        self.assertIn(
+            'validate_data_dir "${TEMP_CACHE}/data"',
             script,
         )
 
