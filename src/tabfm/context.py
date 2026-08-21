@@ -315,6 +315,185 @@ def _sqrt_quota_sample(
     return selected
 
 
+def _sqrt_quota_binary_prior_sample(
+    indices: np.ndarray,
+    groups: np.ndarray,
+    targets: np.ndarray,
+    sample_size: int,
+    *,
+    target_rate: float,
+    seed: int,
+) -> np.ndarray:
+    """Sqrt-frequency group sampling while preserving binary target prior.
+
+    Coverage is driven only by the supplied group labels.
+    Target labels are used only on the training side to preserve the
+    latest-season class prior, never for validation/test adaptation.
+    """
+    indices = np.asarray(
+        indices,
+        dtype=np.int64,
+    )
+
+    groups = np.asarray(groups)
+
+    targets = np.asarray(
+        targets,
+        dtype=np.int64,
+    )
+
+    if (
+        indices.ndim != 1
+        or groups.ndim != 1
+        or targets.ndim != 1
+    ):
+        raise ValueError(
+            "indices/groups/targets must be 1-D."
+        )
+
+    if not (
+        len(indices)
+        == len(groups)
+        == len(targets)
+    ):
+        raise ValueError(
+            "indices/groups/targets length mismatch."
+        )
+
+    if sample_size <= 0:
+        return np.empty(
+            0,
+            dtype=np.int64,
+        )
+
+    if not (
+        np.isfinite(target_rate)
+        and 0.0 <= target_rate <= 1.0
+    ):
+        raise ValueError(
+            "target_rate must lie in [0, 1]."
+        )
+
+    unique_targets = set(
+        np.unique(targets).tolist()
+    )
+
+    if not unique_targets.issubset(
+        {0, 1}
+    ):
+        raise ValueError(
+            "targets must be binary."
+        )
+
+    sample_size = min(
+        int(sample_size),
+        len(indices),
+    )
+
+    available_positive = int(
+        np.sum(targets == 1)
+    )
+
+    available_negative = int(
+        np.sum(targets == 0)
+    )
+
+    positive_take = int(
+        round(
+            sample_size
+            * float(target_rate)
+        )
+    )
+
+    positive_take = min(
+        positive_take,
+        available_positive,
+    )
+
+    negative_take = (
+        sample_size
+        - positive_take
+    )
+
+    if negative_take > available_negative:
+        negative_take = (
+            available_negative
+        )
+
+        positive_take = (
+            sample_size
+            - negative_take
+        )
+
+    if positive_take > available_positive:
+        raise RuntimeError(
+            "Not enough positive rows "
+            "to preserve target prior."
+        )
+
+    selected_parts: list[np.ndarray] = []
+
+    for class_value, take in (
+        (0, negative_take),
+        (1, positive_take),
+    ):
+        if take <= 0:
+            continue
+
+        class_mask = (
+            targets == class_value
+        )
+
+        class_indices = indices[
+            class_mask
+        ]
+
+        class_groups = groups[
+            class_mask
+        ]
+
+        selected_parts.append(
+            _sqrt_quota_sample(
+                class_indices,
+                class_groups,
+                int(take),
+                int(seed)
+                + 101 * class_value,
+            )
+        )
+
+    if selected_parts:
+        selected = np.concatenate(
+            selected_parts
+        ).astype(
+            np.int64,
+            copy=False,
+        )
+    else:
+        selected = np.empty(
+            0,
+            dtype=np.int64,
+        )
+
+    if (
+        len(selected) != sample_size
+        or len(np.unique(selected))
+        != sample_size
+    ):
+        raise RuntimeError(
+            "Prior-preserving sqrt sampler "
+            "produced invalid selection."
+        )
+
+    rng = np.random.default_rng(
+        int(seed) + 999
+    )
+
+    rng.shuffle(selected)
+
+    return selected
+
+
 def _latest_season_pool(
     train: pd.DataFrame,
     allowed_indices: np.ndarray,
@@ -603,12 +782,25 @@ def select_representative_context_indices(
         len(remaining),
     )
 
+    pitcher_targets = pd.to_numeric(
+        pitcher_frame[target_col],
+        errors="raise",
+    ).to_numpy(
+        dtype=np.int64,
+    )
+
+    pool_target_rate = float(
+        target.mean()
+    )
+
     pitcher_selected = (
-        _sqrt_quota_sample(
+        _sqrt_quota_binary_prior_sample(
             remaining,
             pitcher_groups,
+            pitcher_targets,
             pitcher_take,
-            int(seed) + 1,
+            target_rate=pool_target_rate,
+            seed=int(seed) + 1,
         )
     )
 
@@ -629,21 +821,33 @@ def select_representative_context_indices(
         len(remaining),
     )
 
+    situation_frame = (
+        train.iloc[remaining]
+    )
+
     situation_groups = (
         _situation_groups(
-            train.iloc[remaining]
+            situation_frame
         )
+    )
+
+    situation_targets = pd.to_numeric(
+        situation_frame[target_col],
+        errors="raise",
+    ).to_numpy(
+        dtype=np.int64,
     )
 
     situation_selected = (
-        _sqrt_quota_sample(
+        _sqrt_quota_binary_prior_sample(
             remaining,
             situation_groups,
+            situation_targets,
             situation_take,
-            int(seed) + 2,
+            target_rate=pool_target_rate,
+            seed=int(seed) + 2,
         )
     )
-
 
     selected = np.concatenate(
         [
@@ -731,6 +935,34 @@ def select_representative_context_indices(
     rng = np.random.default_rng(
         int(seed) + 4
     )
+
+    selected_target_rate = float(
+        pd.to_numeric(
+            train.iloc[selected][target_col],
+            errors="raise",
+        ).mean()
+    )
+
+    max_rate_drift = max(
+        1.0e-4,
+        2.0 / float(sample_size),
+    )
+
+    if (
+        abs(
+            selected_target_rate
+            - pool_target_rate
+        )
+        > max_rate_drift
+    ):
+        raise RuntimeError(
+            "Representative context changed "
+            "the latest-season target prior too much: "
+            f"pool={pool_target_rate:.8f}, "
+            f"context={selected_target_rate:.8f}, "
+            f"delta="
+            f"{selected_target_rate - pool_target_rate:+.8f}"
+        )
 
     rng.shuffle(selected)
 

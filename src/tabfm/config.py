@@ -36,6 +36,8 @@ class TabDPTExperimentConfig:
     l4_runtime_multiplier: float = 2.25
     non_tabdpt_runtime_reserve_seconds: float = 75.0
     maximum_estimated_runtime_seconds: float = 540.0
+    minimum_2024_blend_gain: float = 3.0e-5
+    minimum_late_blend_gain: float = 3.0e-5
 
     context_strategy: str = (
     "representative_v1"

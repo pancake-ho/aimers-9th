@@ -157,11 +157,31 @@ if [[ ! -f "${DATA_ARCHIVE}" ]]; then
     echo "[ERROR] Missing ${DATA_ARCHIVE}"
     exit 3
 fi
-mkdir -p "${LOCAL_JOB_ROOT}/open" "${LOCAL_PROJECT}/baseline/data"
-unzip -q "${DATA_ARCHIVE}" -d "${LOCAL_JOB_ROOT}/open"
-rsync -a "${LOCAL_JOB_ROOT}/open/data/" "${LOCAL_PROJECT}/baseline/data/"
-export AIMERS_DATA_DIR="${LOCAL_PROJECT}/baseline/data"
-du -sh "${AIMERS_DATA_DIR}"/*
+PERSISTENT_DATA_DIR="/data/${USER}/datasets/aimers_9th/extracted_v1/data"
+
+for required in \
+    train.csv \
+    test.csv \
+    sample_submission.csv \
+    trackman_history.csv
+do
+    if [[ ! -s "${PERSISTENT_DATA_DIR}/${required}" ]]; then
+        echo "[ERROR] Missing persistent dataset cache:"
+        echo "        ${PERSISTENT_DATA_DIR}/${required}"
+        exit 3
+    fi
+done
+
+export AIMERS_DATA_DIR="${PERSISTENT_DATA_DIR}"
+
+echo "[DATA] Using validated persistent cache:"
+echo "       ${AIMERS_DATA_DIR}"
+
+du -sh \
+    "${AIMERS_DATA_DIR}/train.csv" \
+    "${AIMERS_DATA_DIR}/test.csv" \
+    "${AIMERS_DATA_DIR}/sample_submission.csv" \
+    "${AIMERS_DATA_DIR}/trackman_history.csv"
 
 cd "${LOCAL_PROJECT}"
 echo "[PREFLIGHT] Running TabDPT source and contract tests"
