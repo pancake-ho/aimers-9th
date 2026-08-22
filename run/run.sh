@@ -534,7 +534,7 @@ if [[ "${GPU_READY}" -ne 1 ]]; then
 fi
 
 echo "[GPU] Functional CUDA backend confirmed."
-echo "[MODE] xgb-multiview-bag3+cat+resnet+ftt fixedchamp-calibrated-v12"
+echo "[MODE] xgb-multiview-bag3+lgb+cat+resnet+ftt fixedchamp-calibrated-v12"
 
 
 # ============================================================

@@ -289,30 +289,33 @@ class RunScriptContractTests(
             script,
         )
 
-    def test_production_mode_declares_xgb_bag3_v11b(
+    def test_production_mode_declares_xgb_multiview_v12(
         self,
     ) -> None:
         script = self._script()
 
         self.assertIn(
-            "#SBATCH -J ensemble-v11b",
+            "#SBATCH -J ensemble-v12mv",
             script,
         )
 
         self.assertIn(
             (
                 "[MODE] "
-                "xgb-bag3+lgb+cat+resnet+"
-                "ft_transformer "
-                "fixedchamp-calibrated-v11b"
+                "xgb-multiview-bag3+"
+                "lgb+cat+resnet+ftt "
+                "fixedchamp-calibrated-v12"
             ),
             script,
         )
 
-        # Regression guards against accidentally
-        # launching an obsolete strategy.
         self.assertNotIn(
-            "calibrated-shrink-v10",
+            "ensemble-v11b",
+            script,
+        )
+
+        self.assertNotIn(
+            "fixedchamp-calibrated-v11b",
             script,
         )
 

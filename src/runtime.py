@@ -449,6 +449,214 @@ def preprocess_frame(df: pd.DataFrame, state: Mapping[str, object]) -> pd.DataFr
     return matrix[list(state["feature_names"])]
 
 
+def apply_numeric_pca_state(
+    X: pd.DataFrame,
+    state: Mapping[str, object],
+    *,
+    chunk_size: int = 65536,
+) -> pd.DataFrame:
+    """Apply an immutable train-fitted PCA representation.
+
+    This function is intentionally row-independent at inference:
+    - PCA mean/std/components come only from training.
+    - No statistic is fitted from evaluation rows.
+    - Evaluation rows do not interact with one another.
+    """
+
+    columns = list(
+        state["input_columns"]
+    )
+
+    if not columns:
+        raise ValueError(
+            "PCA input column list is empty."
+        )
+
+    missing = [
+        column
+        for column in columns
+        if column not in X.columns
+    ]
+
+    if missing:
+        raise ValueError(
+            "PCA input columns are missing: "
+            f"{missing[:10]}"
+        )
+
+    mean = np.asarray(
+        state["mean"],
+        dtype=np.float64,
+    )
+
+    std = np.asarray(
+        state["std"],
+        dtype=np.float64,
+    )
+
+    components = np.asarray(
+        state["components"],
+        dtype=np.float64,
+    )
+
+    if mean.shape != (
+        len(columns),
+    ):
+        raise ValueError(
+            "PCA mean/input shape mismatch."
+        )
+
+    if std.shape != (
+        len(columns),
+    ):
+        raise ValueError(
+            "PCA std/input shape mismatch."
+        )
+
+    if components.ndim != 2:
+        raise ValueError(
+            "PCA components must be "
+            "two-dimensional."
+        )
+
+    if (
+        components.shape[1]
+        != len(columns)
+    ):
+        raise ValueError(
+            "PCA component/input mismatch."
+        )
+
+    if (
+        not np.isfinite(mean).all()
+        or not np.isfinite(std).all()
+        or not np.isfinite(
+            components
+        ).all()
+    ):
+        raise ValueError(
+            "PCA state contains "
+            "NaN or infinity."
+        )
+
+    if (
+        std <= 0.0
+    ).any():
+        raise ValueError(
+            "PCA standard deviation "
+            "must be positive."
+        )
+
+    clip = float(
+        state.get(
+            "clip",
+            8.0,
+        )
+    )
+
+    if (
+        not np.isfinite(clip)
+        or clip <= 0.0
+    ):
+        raise ValueError(
+            "Invalid PCA clipping bound."
+        )
+
+    n_rows = int(
+        len(X)
+    )
+
+    n_components = int(
+        components.shape[0]
+    )
+
+    output = np.empty(
+        (
+            n_rows,
+            n_components,
+        ),
+        dtype=np.float32,
+    )
+
+    for start in range(
+        0,
+        n_rows,
+        int(chunk_size),
+    ):
+        stop = min(
+            n_rows,
+            start + int(chunk_size),
+        )
+
+        chunk = (
+            X.iloc[
+                start:stop
+            ][columns]
+            .to_numpy(
+                dtype=np.float64,
+                copy=True,
+            )
+        )
+
+        if not np.isfinite(
+            chunk
+        ).all():
+            raise ValueError(
+                "PCA input matrix contains "
+                "NaN or infinity."
+            )
+
+        chunk -= mean
+        chunk /= std
+
+        np.clip(
+            chunk,
+            -clip,
+            clip,
+            out=chunk,
+        )
+
+        projection = (
+            chunk
+            @ components.T
+        )
+
+        output[
+            start:stop
+        ] = projection.astype(
+            np.float32,
+            copy=False,
+        )
+
+    if not np.isfinite(
+        output
+    ).all():
+        raise ValueError(
+            "PCA representation contains "
+            "NaN or infinity."
+        )
+
+    prefix = str(
+        state.get(
+            "output_prefix",
+            "mv_pca",
+        )
+    )
+
+    names = [
+        f"{prefix}_{index:02d}"
+        for index in range(
+            n_components
+        )
+    ]
+
+    return pd.DataFrame(
+        output,
+        index=X.index,
+        columns=names,
+    )
+
+
 def apply_probability_bias(prediction, bias: float) -> np.ndarray:
     pred = np.asarray(prediction, dtype=np.float64)
     return np.clip(pred - float(bias), 1e-6, 1.0 - 1e-6)

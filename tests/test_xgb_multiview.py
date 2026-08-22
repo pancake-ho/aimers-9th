@@ -110,14 +110,19 @@ class XGBoostMultiViewTests(
             )
         )
 
-        self.assertAlmostEqual(
+        np.testing.assert_allclose(
             float(
-                weight.sum()
+                weight.sum(
+                    dtype=np.float64
+                )
             ),
             float(
-                base.sum()
+                base.sum(
+                    dtype=np.float64
+                )
             ),
-            places=5,
+            rtol=1.0e-7,
+            atol=1.0e-6,
         )
 
         self.assertGreater(
@@ -126,6 +131,34 @@ class XGBoostMultiViewTests(
             ],
             0.0,
         )
+        self.assertEqual(
+            weight.dtype,
+            np.float32,
+        )
+
+        self.assertTrue(
+            np.isfinite(
+                weight
+            ).all()
+        )
+
+        self.assertTrue(
+            (
+                weight > 0.0
+            ).all()
+        )
+
+        self.assertEqual(
+            weight.shape,
+            base.shape,
+        )
+
+        self.assertGreater(
+            diagnostics[
+                "factor_std"
+            ],
+            0.0,
+        )        
 
     def test_multiview_blend(
         self,

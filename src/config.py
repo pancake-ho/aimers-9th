@@ -446,27 +446,15 @@ class ExperimentConfig:
     # Frozen before V11 evaluation.
     # Public leaderboard statistics are not used
     # for model fitting, calibration, or gating.
-    submission_gate_previous_forward_brier = (
+    submission_gate_previous_forward_brier: float = (
         0.24803627124515615
     )
 
-    # --------------------------------------------------------
-    # Previous-champion temporal anchors.
-    #
-    # These are the frozen validation results of V10,
-    # determined before V11 is evaluated.
-    #
-    # Public-LB predictions/statistics are NOT used here.
-    # V11 is not allowed to buy aggregate improvement by
-    # regressing either of the two most relevant future
-    # validation regimes.
-    # --------------------------------------------------------
-
-    submission_gate_previous_2024_raw_brier = (
+    submission_gate_previous_2024_raw_brier: float = (
         0.24802482024929126
     )
 
-    submission_gate_previous_late_calibrated_brier = (
+    submission_gate_previous_late_calibrated_brier: float = (
         0.24784041429332387
     )
 

@@ -16,7 +16,16 @@ if str(PROJECT_ROOT) not in sys.path:
 from src.config import FeatureConfig
 from src.features import LeakageSafeFeatureEngineer
 from src.preprocessing import TabularPreprocessor
-from src.runtime import apply_logit_intercept, blend_predictions
+from src.runtime import (
+    apply_logit_intercept,
+    apply_numeric_pca_state as runtime_apply_numeric_pca_state,
+    blend_predictions,
+)
+
+from src.xgb_multiview import (
+    apply_numeric_pca_state as training_apply_numeric_pca_state,
+    fit_numeric_pca_state,
+)
 
 
 def _raw_rows() -> pd.DataFrame:
@@ -128,6 +137,55 @@ class RuntimeContractTests(unittest.TestCase):
         self.assertNotIn("hierarchical_success_rate", features)
         self.assertNotIn("hierarchical_success_logit", features)
 
+    def test_runtime_pca_matches_training_pca(
+        self,
+    ) -> None:
+        rng = np.random.default_rng(
+            2026
+        )
+
+        X = pd.DataFrame(
+            rng.normal(
+                size=(
+                    256,
+                    10,
+                )
+            ).astype(
+                np.float32
+            ),
+            columns=[
+                f"f{index}"
+                for index in range(10)
+            ],
+        )
+
+        state = fit_numeric_pca_state(
+            X,
+            X.columns,
+            n_components=4,
+        )
+
+        training_result = (
+            training_apply_numeric_pca_state(
+                X,
+                state,
+            )
+        )
+
+        runtime_result = (
+            runtime_apply_numeric_pca_state(
+                X,
+                state,
+            )
+        )
+
+        assert_frame_equal(
+            training_result,
+            runtime_result,
+            check_dtype=True,
+            atol=0.0,
+            rtol=0.0,
+        )
 
 if __name__ == "__main__":
     unittest.main()

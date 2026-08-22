@@ -920,7 +920,7 @@ def select_xgb_multiview_weights(
     )
 
     candidates = 0
-    feasible = 1
+    feasible = 0
 
     for base_step in range(
         n_steps + 1

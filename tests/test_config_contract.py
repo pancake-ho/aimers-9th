@@ -155,19 +155,19 @@ class ConfigContractTests(
         self.assertEqual(
             config
             .submission_gate_previous_2024_raw_brier,
-            0.2480396804583947,
+            0.24802482024929126,
         )
 
         self.assertEqual(
             config
             .submission_gate_previous_late_calibrated_brier,
-            0.24786380942232472,
+            0.24784041429332387,
         )
 
         self.assertEqual(
             config
             .submission_gate_previous_forward_brier,
-            0.24805544458470605,
+            0.24803627124515615,
         )
 
         self.assertEqual(
@@ -222,6 +222,44 @@ class ConfigContractTests(
             ),
             100,
         )
+        self.assertEqual(
+            config.models
+            .xgb_multiview_group_columns,
+            (
+                "pitcher_count_combo",
+                "pitcher_base_combo",
+            ),
+        )
+
+        self.assertEqual(
+            config.models
+            .xgb_multiview_leverage_column,
+            "li_log",
+        )
+
+        self.assertEqual(
+            config.models
+            .xgb_multiview_grid_step,
+            0.05,
+        )
+
+        self.assertEqual(
+            config.models
+            .xgb_multiview_minimum_base_weight,
+            0.45,
+        )
+
+        self.assertEqual(
+            config.models
+            .xgb_multiview_maximum_aux_weight,
+            0.40,
+        )
+
+        self.assertEqual(
+            config.models
+            .xgb_multiview_protected_tolerance,
+            1.0e-5,
+        )        
 
     def test_neural_training_can_be_disabled_without_changing_model_defaults(
         self,

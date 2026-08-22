@@ -17,13 +17,18 @@ class OptionalNeuralSubmissionTests(
         model_order: list[str],
         xgb_model_files: list[str]
         | None = None,
+        *,
+        xgb_multiview: bool = False,
     ) -> dict[str, Path]:
         with tempfile.TemporaryDirectory() as temp_dir:
-            root = Path(temp_dir)
+            root = Path(
+                temp_dir
+            )
 
             model_dir = (
                 root / "model"
             )
+
             model_dir.mkdir()
 
             manifest = {
@@ -40,13 +45,48 @@ class OptionalNeuralSubmissionTests(
                     "xgb_bagging"
                 ] = {
                     "seeds": [
-                        2026,
-                        2027,
-                        2028,
+                        2026 + index
+                        for index in range(
+                            len(
+                                xgb_model_files
+                            )
+                        )
                     ],
+
                     "model_files": (
                         xgb_model_files
                     ),
+                }
+
+            if xgb_multiview:
+                manifest[
+                    "xgb_multiview"
+                ] = {
+                    "view_order": [
+                        "base",
+                        "representation",
+                        "representative",
+                    ],
+
+                    "weights": [
+                        0.70,
+                        0.20,
+                        0.10,
+                    ],
+
+                    "representation_model_file": (
+                        "xgb_representation.json"
+                    ),
+
+                    "representative_model_file": (
+                        "xgb_representative.json"
+                    ),
+
+                    "representation_feature_count": 100,
+
+                    "representation_raw_feature_count": 92,
+
+                    "pca_component_count": 8,
                 }
 
             (
@@ -68,6 +108,52 @@ class OptionalNeuralSubmissionTests(
                     build_submit
                     ._required_files()
                 )
+
+    def test_xgb_multiview_artifacts_are_packaged(
+        self,
+    ) -> None:
+        files = (
+            self._required_files_for(
+                [
+                    "xgb",
+                    "lgb",
+                    "cat",
+                    "resnet",
+                    "ft_transformer",
+                ],
+                xgb_model_files=[
+                    "xgb_model.json",
+                    "xgb_model_seed2027.json",
+                    "xgb_model_seed2028.json",
+                ],
+                xgb_multiview=True,
+            )
+        )
+
+        self.assertIn(
+            "model/xgb_representation.json",
+            files,
+        )
+
+        self.assertIn(
+            "model/xgb_representative.json",
+            files,
+        )
+
+        self.assertIn(
+            "model/xgb_model.json",
+            files,
+        )
+
+        self.assertIn(
+            "model/xgb_model_seed2027.json",
+            files,
+        )
+
+        self.assertIn(
+            "model/xgb_model_seed2028.json",
+            files,
+        )
 
     def test_xgb_bagging_artifacts_are_packaged(
         self,

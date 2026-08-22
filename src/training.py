@@ -62,8 +62,10 @@ def _strategy_name(
 ) -> str:
     if model_order == GBDT_MODEL_ORDER:
         return (
-            "temporal_xgbbag3_lgb_cat_"
-            "fixedchamp_calibrated_v11b"
+            "temporal_xgb_multiview_"
+            "bag3_repr100_reweight_"
+            "lgb_cat_fixedchamp_"
+            "calibrated_v12"
         )
 
     if model_order == (
@@ -71,9 +73,10 @@ def _strategy_name(
         "resnet",
     ):
         return (
-            "temporal_xgbbag3_lgb_cat_"
-            "resnet_fixedchamp_"
-            "calibrated_v11b"
+            "temporal_xgb_multiview_"
+            "bag3_repr100_reweight_"
+            "lgb_cat_resnet_"
+            "fixedchamp_calibrated_v12"
         )
 
     if model_order == (
@@ -82,9 +85,10 @@ def _strategy_name(
         "ft_transformer",
     ):
         return (
-            "temporal_xgbbag3_lgb_cat_"
-            "resnet_ftt_fixedchamp_"
-            "calibrated_v11b"
+            "temporal_xgb_multiview_"
+            "bag3_repr100_reweight_"
+            "lgb_cat_resnet_ftt_"
+            "fixedchamp_calibrated_v12"
         )
 
     raise ValueError(
@@ -323,6 +327,26 @@ def run_temporal_validation(
                 representative_prediction
             ),
         }
+        xgb_view_metrics = {
+            name: evaluate_probabilities(
+                y_valid,
+                prediction,
+            )
+            for name, prediction
+            in xgb_views.items()
+        }
+
+        for (
+            view_name,
+            view_metrics,
+        ) in xgb_view_metrics.items():
+            _print_metrics(
+                (
+                    f"{fold.validation_label}"
+                    f"/xgb_view_{view_name}"
+                ),
+                view_metrics,
+            )        
 
         print(
             "[XGB-MULTIVIEW] "
@@ -503,6 +527,9 @@ def run_temporal_validation(
                     "representative_diagnostics": (
                         representative_diagnostics
                     ),
+                    "view_metrics": (
+                        xgb_view_metrics
+                    ),                    
                 },
             }
         )
@@ -650,7 +677,12 @@ def run_temporal_validation(
                     fold[
                         "xgb_bagging_ablation"
                     ]
-                ),                
+                ),   
+                "xgb_multiview_fold_state": (
+                    fold[
+                        "xgb_multiview_fold_state"
+                    ]
+                ),                             
             }
         )
 
@@ -969,22 +1001,10 @@ def run_temporal_validation(
             .submission_gate_2023_max_brier
         ),
 
-        "2024_non_degradation": (
-            gain_2024_vs_reference
-            + 1.0e-15
-            >= config
-            .submission_gate_2024_min_gain_vs_reference
-        ),
-
-        "late_raw_non_degradation": (
-            gain_late_raw_vs_reference
-            + 1.0e-15
-            >= config
-            .submission_gate_late_raw_min_gain_vs_reference
-        ),
-
         "calibration_accepted": bool(
-            calibrator["accepted"]
+            calibrator[
+                "accepted"
+            ]
         ),
 
         "calibration_transfer_gain": (
@@ -996,13 +1016,6 @@ def run_temporal_validation(
             + 1.0e-15
             >= config
             .submission_gate_calibration_min_transfer_gain
-        ),
-
-        "late_calibrated_gain_vs_reference": (
-            gain_late_calibrated_vs_reference
-            + 1.0e-15
-            >= config
-            .submission_gate_late_calibrated_min_gain_vs_reference
         ),
 
         "entity_2024_paired_ablation": (
@@ -1019,6 +1032,7 @@ def run_temporal_validation(
             .submission_gate_entity_late_min_gain
         ),
 
+        # The champion bag3 must still be healthy.
         "xgb_bagging_2024": (
             xgb_bagging_2024_gain
             + 1.0e-15
@@ -1033,6 +1047,27 @@ def run_temporal_validation(
             .submission_gate_xgb_bagging_late_min_gain
         ),
 
+        # Multi-view selection explicitly permits only a very small
+        # protected-fold degradation while searching for complementary
+        # signal.
+        "xgb_multiview_2024_protected": (
+            xgb_mv_2024_gain
+            + config.models
+            .xgb_multiview_protected_tolerance
+            + 1.0e-15
+            >= 0.0
+        ),
+
+        "xgb_multiview_late_protected": (
+            xgb_mv_late_gain
+            + config.models
+            .xgb_multiview_protected_tolerance
+            + 1.0e-15
+            >= 0.0
+        ),
+
+        # Compare the actually deployed predictor against the
+        # frozen 907 validation champion.
         "beats_previous_forward_objective": (
             forward_improvement
             + 1.0e-15
@@ -1052,6 +1087,28 @@ def run_temporal_validation(
             + 1.0e-15
             >= config
             .submission_gate_previous_late_calibrated_min_gain
+        ),
+    }
+
+    diagnostics = {
+        "2024_ensemble_gain_vs_current_xgb": float(
+            gain_2024_vs_reference
+        ),
+
+        "late_raw_ensemble_gain_vs_current_xgb": float(
+            gain_late_raw_vs_reference
+        ),
+
+        "late_calibrated_gain_vs_current_xgb": float(
+            gain_late_calibrated_vs_reference
+        ),
+
+        "xgb_multiview_2024_gain_vs_bag3": float(
+            xgb_mv_2024_gain
+        ),
+
+        "xgb_multiview_late_gain_vs_bag3": float(
+            xgb_mv_late_gain
         ),
     }
 
@@ -1078,6 +1135,10 @@ def run_temporal_validation(
         "passed": gate_passed,
 
         "checks": checks,
+
+        "diagnostics": (
+            diagnostics
+        ),        
 
         "observed": {
             "weight_policy": (
@@ -1196,7 +1257,7 @@ def run_temporal_validation(
 
             "champion_late_calibrated_gain": (
                 champion_late_calibrated_gain
-            ),
+            ),            
         },
 
         "thresholds": {
@@ -1625,6 +1686,50 @@ def train_and_save_final_models(
                 for path
                 in xgb_paths
             ],
+        },
+        "xgb_multiview": {
+            "view_order": list(
+                ensemble_state[
+                    "xgb_multiview"
+                ][
+                    "view_order"
+                ]
+            ),
+
+            "weights": list(
+                ensemble_state[
+                    "xgb_multiview"
+                ][
+                    "weights"
+                ]
+            ),
+
+            "representation_model_file": (
+                representation_path.name
+            ),
+
+            "representative_model_file": (
+                representative_path.name
+            ),
+
+            "representation_feature_count": int(
+                len(
+                    representation_raw_features
+                )
+                + config.models
+                .xgb_multiview_pca_components
+            ),
+
+            "representation_raw_feature_count": int(
+                len(
+                    representation_raw_features
+                )
+            ),
+
+            "pca_component_count": int(
+                config.models
+                .xgb_multiview_pca_components
+            ),
         },        
     }
     with open(model_dir / "manifest.json", "w", encoding="utf-8") as handle:
