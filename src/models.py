@@ -39,25 +39,93 @@ def _xgb_brier_metric(prediction, dmatrix):
     return "brier", float(score)
 
 
-def _xgb_params(config: ModelConfig) -> dict:
+def _xgb_params(
+    config: ModelConfig,
+    *,
+    seed: int | None = None,
+) -> dict:
+    resolved_seed = (
+        int(config.random_seed)
+        if seed is None
+        else int(seed)
+    )
+
     return {
         "objective": "binary:logistic",
         "disable_default_eval_metric": 1,
-        "learning_rate": config.xgb_learning_rate,
-        "max_depth": config.xgb_max_depth,
-        "min_child_weight": config.xgb_min_child_weight,
-        "subsample": config.xgb_subsample,
-        "colsample_bytree": config.xgb_colsample_bytree,
-        "reg_lambda": config.xgb_reg_lambda,
-        "reg_alpha": config.xgb_reg_alpha,
-        "gamma": config.xgb_gamma,
+        "learning_rate": (
+            config.xgb_learning_rate
+        ),
+        "max_depth": (
+            config.xgb_max_depth
+        ),
+        "min_child_weight": (
+            config.xgb_min_child_weight
+        ),
+        "subsample": (
+            config.xgb_subsample
+        ),
+        "colsample_bytree": (
+            config.xgb_colsample_bytree
+        ),
+        "reg_lambda": (
+            config.xgb_reg_lambda
+        ),
+        "reg_alpha": (
+            config.xgb_reg_alpha
+        ),
+        "gamma": (
+            config.xgb_gamma
+        ),
         "tree_method": "hist",
-        "max_bin": int(config.xgb_max_bin),
-        "device": config.xgb_device.lower(),
-        "seed": config.random_seed,
-        "nthread": config.num_threads,
+        "max_bin": int(
+            config.xgb_max_bin
+        ),
+        "device": (
+            config.xgb_device.lower()
+        ),
+        "seed": resolved_seed,
+        "nthread": (
+            config.num_threads
+        ),
         "verbosity": 1,
     }
+
+
+def _validated_xgb_bagging_seeds(
+    config: ModelConfig,
+) -> tuple[int, ...]:
+    seeds = tuple(
+        int(seed)
+        for seed
+        in config.xgb_bagging_seeds
+    )
+
+    if not seeds:
+        raise ValueError(
+            "xgb_bagging_seeds "
+            "must not be empty."
+        )
+
+    if len(seeds) != len(
+        set(seeds)
+    ):
+        raise ValueError(
+            "xgb_bagging_seeds "
+            "must be unique."
+        )
+
+    if seeds[0] != int(
+        config.random_seed
+    ):
+        raise ValueError(
+            "The first XGBoost bagging "
+            "seed must equal random_seed "
+            "so seed-2026 remains the "
+            "validated V10 baseline."
+        )
+
+    return seeds
 
 
 def _quantile_dmatrix(
@@ -196,6 +264,246 @@ def train_xgboost_fold(
         best_iteration + 1,
     )
 
+
+def train_xgboost_bagged_fold(
+    X_train: pd.DataFrame,
+    y_train: np.ndarray,
+    X_valid: pd.DataFrame,
+    y_valid: np.ndarray,
+    sample_weight: np.ndarray,
+    config: ModelConfig,
+):
+    seeds = (
+        _validated_xgb_bagging_seeds(
+            config
+        )
+    )
+
+    dtrain = _quantile_dmatrix(
+        X_train,
+        config,
+        label=y_train,
+        weight=sample_weight,
+    )
+
+    dvalid = _quantile_dmatrix(
+        X_valid,
+        config,
+        label=y_valid,
+        ref=dtrain,
+    )
+
+    # --------------------------------------------------------
+    # Seed 2026 remains exactly the V10 model and determines
+    # early stopping.  Additional seeds use the same number
+    # of rounds so bagging does not confound the experiment
+    # with per-seed iteration tuning.
+    # --------------------------------------------------------
+
+    base_seed = seeds[0]
+
+    base_model = xgb.train(
+        params=_xgb_params(
+            config,
+            seed=base_seed,
+        ),
+        dtrain=dtrain,
+        num_boost_round=(
+            config.xgb_num_boost_round
+        ),
+        evals=[
+            (
+                dvalid,
+                "valid",
+            )
+        ],
+        custom_metric=(
+            _xgb_brier_metric
+        ),
+        maximize=False,
+        early_stopping_rounds=(
+            config
+            .xgb_early_stopping_rounds
+        ),
+        verbose_eval=50,
+    )
+
+    base_best_iteration = (
+        int(
+            base_model.best_iteration
+        )
+        if (
+            base_model.best_iteration
+            is not None
+        )
+        else (
+            config.xgb_num_boost_round
+            - 1
+        )
+    )
+
+    num_rounds = (
+        base_best_iteration + 1
+    )
+
+    base_prediction = (
+        np.asarray(
+            base_model.predict(
+                dvalid,
+                iteration_range=(
+                    0,
+                    num_rounds,
+                ),
+            ),
+            dtype=np.float64,
+        )
+    )
+
+    models = [
+        base_model
+    ]
+
+    seed_predictions = [
+        base_prediction
+    ]
+
+    print(
+        "[XGB-BAG] "
+        f"seed={base_seed} "
+        f"rounds={num_rounds}"
+    )
+
+    for seed in seeds[1:]:
+        model = xgb.train(
+            params=_xgb_params(
+                config,
+                seed=seed,
+            ),
+            dtrain=dtrain,
+            num_boost_round=(
+                num_rounds
+            ),
+            verbose_eval=False,
+        )
+
+        prediction = (
+            np.asarray(
+                model.predict(
+                    dvalid
+                ),
+                dtype=np.float64,
+            )
+        )
+
+        if (
+            prediction.shape
+            != base_prediction.shape
+        ):
+            raise RuntimeError(
+                "XGBoost seed prediction "
+                "shape mismatch."
+            )
+
+        if not np.isfinite(
+            prediction
+        ).all():
+            raise RuntimeError(
+                "XGBoost seed prediction "
+                "contains NaN/inf."
+            )
+
+        models.append(
+            model
+        )
+
+        seed_predictions.append(
+            prediction
+        )
+
+        print(
+            "[XGB-BAG] "
+            f"seed={seed} "
+            f"rounds={num_rounds}"
+        )
+
+    stacked = np.vstack(
+        seed_predictions
+    )
+
+    bagged_prediction = (
+        stacked.mean(
+            axis=0,
+            dtype=np.float64,
+        )
+    )
+
+    del (
+        dtrain,
+        dvalid,
+        stacked,
+        seed_predictions,
+    )
+
+    gc.collect()
+
+    return (
+        models,
+        bagged_prediction,
+        int(num_rounds),
+        base_prediction,
+    )
+
+
+def train_xgboost_full_bagged(
+    X_train: pd.DataFrame,
+    y_train: np.ndarray,
+    sample_weight: np.ndarray,
+    config: ModelConfig,
+    num_boost_round: int,
+):
+    seeds = (
+        _validated_xgb_bagging_seeds(
+            config
+        )
+    )
+
+    dtrain = _quantile_dmatrix(
+        X_train,
+        config,
+        label=y_train,
+        weight=sample_weight,
+    )
+
+    models = []
+
+    for seed in seeds:
+        print(
+            "[XGB-BAG/FINAL] "
+            f"seed={seed} "
+            f"rounds={num_boost_round}"
+        )
+
+        model = xgb.train(
+            params=_xgb_params(
+                config,
+                seed=seed,
+            ),
+            dtrain=dtrain,
+            num_boost_round=int(
+                num_boost_round
+            ),
+            verbose_eval=False,
+        )
+
+        models.append(
+            model
+        )
+
+    del dtrain
+    gc.collect()
+
+    return models
+    
 
 def train_xgboost_full(
     X_train: pd.DataFrame,

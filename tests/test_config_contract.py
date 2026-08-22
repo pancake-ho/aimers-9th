@@ -143,6 +143,16 @@ class ConfigContractTests(
             5.0e-5,
         )
 
+        self.assertEqual(
+            config.models
+            .xgb_bagging_seeds,
+            (
+                2026,
+                2027,
+                2028,
+            ),
+        )
+
     def test_neural_training_can_be_disabled_without_changing_model_defaults(
         self,
     ) -> None:

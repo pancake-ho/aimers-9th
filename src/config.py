@@ -121,6 +121,24 @@ class ModelConfig:
     random_seed: int = 2026
     num_threads: int = 16
 
+    # --------------------------------------------------------
+    # XGBoost seed bagging
+    #
+    # The current dominant model uses subsample and column
+    # subsampling, so different seeds produce genuinely
+    # different tree ensembles.  Keep the validated V10 seed
+    # as the first member and average two additional seeds.
+    # --------------------------------------------------------
+
+    xgb_bagging_seeds: Tuple[
+        int,
+        ...
+    ] = (
+        2026,
+        2027,
+        2028,
+    )
+
     # ------------------------------------------------------------
     # XGBoost
     # ------------------------------------------------------------
@@ -356,6 +374,31 @@ class ExperimentConfig:
     submission_gate_calibration_min_transfer_gain: float = 3.0e-5
 
     submission_gate_late_calibrated_min_gain_vs_reference: float = 5.0e-5
+
+    # --------------------------------------------------------
+    # V11 XGBoost seed-bagging gate.
+    #
+    # Seed bagging itself must not regress on either of the
+    # two closest temporal regimes.
+    # --------------------------------------------------------
+
+    submission_gate_xgb_bagging_2024_min_gain: float = 0.0
+
+    submission_gate_xgb_bagging_late_min_gain: float = 0.0
+
+    # V10 / score=902.415 validation anchor.
+    #
+    # This is NOT a leaderboard-tuned probability parameter.
+    # It is the previous model's pre-existing validation
+    # objective and is used only to refuse packaging a V11
+    # candidate that does not improve our current champion.
+    submission_gate_previous_forward_brier: float = (
+        0.24805544458470605
+    )
+
+    submission_gate_min_forward_improvement: float = (
+        2.0e-6
+    )
 
     # --------------------------------------------------------
     # Trackman entity gates.

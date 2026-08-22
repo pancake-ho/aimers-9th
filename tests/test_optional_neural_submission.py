@@ -15,6 +15,8 @@ class OptionalNeuralSubmissionTests(
     def _required_files_for(
         self,
         model_order: list[str],
+        xgb_model_files: list[str]
+        | None = None,
     ) -> dict[str, Path]:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -24,16 +26,35 @@ class OptionalNeuralSubmissionTests(
             )
             model_dir.mkdir()
 
+            manifest = {
+                "model_order": (
+                    model_order
+                )
+            }
+
+            if (
+                xgb_model_files
+                is not None
+            ):
+                manifest[
+                    "xgb_bagging"
+                ] = {
+                    "seeds": [
+                        2026,
+                        2027,
+                        2028,
+                    ],
+                    "model_files": (
+                        xgb_model_files
+                    ),
+                }
+
             (
                 model_dir
                 / "manifest.json"
             ).write_text(
                 json.dumps(
-                    {
-                        "model_order": (
-                            model_order
-                        )
-                    }
+                    manifest
                 ),
                 encoding="utf-8",
             )
@@ -47,6 +68,41 @@ class OptionalNeuralSubmissionTests(
                     build_submit
                     ._required_files()
                 )
+
+    def test_xgb_bagging_artifacts_are_packaged(
+        self,
+    ) -> None:
+        files = (
+            self._required_files_for(
+                [
+                    "xgb",
+                    "lgb",
+                    "cat",
+                    "resnet",
+                    "ft_transformer",
+                ],
+                xgb_model_files=[
+                    "xgb_model.json",
+                    "xgb_model_seed2027.json",
+                    "xgb_model_seed2028.json",
+                ],
+            )
+        )
+
+        self.assertIn(
+            "model/xgb_model.json",
+            files,
+        )
+
+        self.assertIn(
+            "model/xgb_model_seed2027.json",
+            files,
+        )
+
+        self.assertIn(
+            "model/xgb_model_seed2028.json",
+            files,
+        )
 
     def test_gbdt_fallback_archive_does_not_require_neural_files(
         self,

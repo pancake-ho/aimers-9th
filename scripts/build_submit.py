@@ -121,6 +121,67 @@ def _required_files() -> dict[str, Path]:
             f"model_order: {model_order}"
         )
 
+    # --------------------------------------------------------
+    # Optional XGBoost seed-bagging artifacts.
+    # --------------------------------------------------------
+
+    xgb_bagging = (
+        manifest.get(
+            "xgb_bagging",
+            {},
+        )
+    )
+
+    xgb_model_files = list(
+        xgb_bagging.get(
+            "model_files",
+            [
+                "xgb_model.json",
+            ],
+        )
+    )
+
+    if not xgb_model_files:
+        raise ValueError(
+            "Manifest XGBoost model "
+            "file list is empty."
+        )
+
+    if (
+        xgb_model_files[0]
+        != "xgb_model.json"
+    ):
+        raise ValueError(
+            "First XGBoost artifact "
+            "must be xgb_model.json."
+        )
+
+    for filename in (
+        xgb_model_files
+    ):
+        path_name = Path(
+            filename
+        )
+
+        if (
+            path_name.name
+            != filename
+            or path_name.suffix
+            != ".json"
+        ):
+            raise ValueError(
+                "Invalid XGBoost "
+                "artifact filename: "
+                f"{filename}"
+            )
+
+        files[
+            f"model/{filename}"
+        ] = (
+            MODEL_DIR
+            / filename
+        )
+
     # Do not derive neural models using
     # a hard-coded GBDT slice.
     neural_names = [

@@ -26,8 +26,8 @@ from src.models import (
     train_catboost_full,
     train_lightgbm_fold,
     train_lightgbm_full,
-    train_xgboost_fold,
-    train_xgboost_full,
+    train_xgboost_bagged_fold,
+    train_xgboost_full_bagged,
 )
 from src.preprocessing import TabularPreprocessor
 from src.runtime import apply_logit_intercept, blend_predictions
@@ -56,8 +56,8 @@ def _strategy_name(
 ) -> str:
     if model_order == GBDT_MODEL_ORDER:
         return (
-            "temporal_xgb_lgb_cat_"
-            "calibrated_shrink_v10"
+            "temporal_xgbbag3_lgb_cat_"
+            "calibrated_shrink_v11"
         )
 
     if model_order == (
@@ -65,8 +65,8 @@ def _strategy_name(
         "resnet",
     ):
         return (
-            "temporal_xgb_lgb_cat_"
-            "resnet_calibrated_shrink_v10"
+            "temporal_xgbbag3_lgb_cat_"
+            "resnet_calibrated_shrink_v11"
         )
 
     if model_order == (
@@ -75,9 +75,9 @@ def _strategy_name(
         "ft_transformer",
     ):
         return (
-            "temporal_xgb_lgb_cat_"
+            "temporal_xgbbag3_lgb_cat_"
             "resnet_ftt_"
-            "calibrated_shrink_v10"
+            "calibrated_shrink_v11"
         )
 
     raise ValueError(
@@ -171,65 +171,108 @@ def run_temporal_validation(
         per_model_metrics: Dict[str, Dict[str, float]] = {}
         entity_ablation: Dict[str, object] | None = None
 
-        start = time.perf_counter()
-        xgb_model, predictions["xgb"], best_iterations["xgb"] = train_xgboost_fold(
-            X_train,
-            y_train,
-            X_valid,
-            y_valid,
-            sample_weight,
-            config.models,
-        )
-        elapsed = time.perf_counter() - start
-        per_model_metrics["xgb"] = evaluate_probabilities(y_valid, predictions["xgb"])
-        per_model_metrics["xgb"]["train_seconds"] = float(elapsed)
-        _print_metrics(f"{fold.validation_label}/xgb", per_model_metrics["xgb"])
+        # ----------------------------------------------------
+        # XGBoost 3-seed bagging.
+        # ----------------------------------------------------
 
-        entity_columns = [
-            column for column in X_train.columns if column.startswith("tm_entity_")
-        ]
-        if entity_gate_required:
-            if not entity_columns:
-                raise RuntimeError(
-                    "Trackman entity resolution is enabled but no tm_entity_* "
-                    "features reached the preprocessor."
+        start = time.perf_counter()
+
+        (
+            xgb_models,
+            predictions["xgb"],
+            best_iterations["xgb"],
+            xgb_single_prediction,
+        ) = (
+            train_xgboost_bagged_fold(
+                X_train,
+                y_train,
+                X_valid,
+                y_valid,
+                sample_weight,
+                config.models,
+            )
+        )
+
+        elapsed = (
+            time.perf_counter()
+            - start
+        )
+
+        per_model_metrics[
+            "xgb"
+        ] = evaluate_probabilities(
+            y_valid,
+            predictions["xgb"],
+        )
+
+        per_model_metrics[
+            "xgb"
+        ][
+            "train_seconds"
+        ] = float(elapsed)
+
+        xgb_single_metrics = (
+            evaluate_probabilities(
+                y_valid,
+                xgb_single_prediction,
+            )
+        )
+
+        xgb_bagging_gain = float(
+            xgb_single_metrics["brier"]
+            - per_model_metrics[
+                "xgb"
+            ]["brier"]
+        )
+
+        xgb_bagging_ablation = {
+            "single_seed": (
+                int(
+                    config.models
+                    .xgb_bagging_seeds[0]
                 )
-            baseline_columns = [
-                column for column in X_train.columns if column not in entity_columns
-            ]
-            start_ablation = time.perf_counter()
-            baseline_model, baseline_prediction, baseline_iterations = (
-                train_xgboost_fold(
-                    X_train[baseline_columns],
-                    y_train,
-                    X_valid[baseline_columns],
-                    y_valid,
-                    sample_weight,
-                    config.models,
-                )
-            )
-            baseline_metrics = evaluate_probabilities(y_valid, baseline_prediction)
-            baseline_metrics["train_seconds"] = float(
-                time.perf_counter() - start_ablation
-            )
-            entity_gain = float(
-                baseline_metrics["brier"] - per_model_metrics["xgb"]["brier"]
-            )
-            entity_ablation = {
-                "baseline_without_entity": baseline_metrics,
-                "with_entity": dict(per_model_metrics["xgb"]),
-                "brier_gain": entity_gain,
-                "n_entity_features": int(len(entity_columns)),
-                "baseline_best_iterations": int(baseline_iterations),
-            }
-            print(
-                f"[{fold.validation_label}/entity-ablation] "
-                f"baseline={baseline_metrics['brier']:.8f} "
-                f"with_entity={per_model_metrics['xgb']['brier']:.8f} "
-                f"gain={entity_gain:+.8f} features={len(entity_columns)}"
-            )
-            del baseline_model, baseline_prediction
-        del xgb_model
+            ),
+            "seeds": [
+                int(seed)
+                for seed
+                in config.models
+                .xgb_bagging_seeds
+            ],
+            "single_seed_metrics": (
+                xgb_single_metrics
+            ),
+            "bagged_metrics": dict(
+                per_model_metrics[
+                    "xgb"
+                ]
+            ),
+            "brier_gain": (
+                xgb_bagging_gain
+            ),
+        }
+
+        _print_metrics(
+            f"{fold.validation_label}/xgb",
+            per_model_metrics["xgb"],
+        )
+
+        print(
+            "[XGB-BAG-ABLATION] "
+            f"fold="
+            f"{fold.validation_label} "
+            f"single="
+            f"{xgb_single_metrics['brier']:.8f} "
+            f"bagged="
+            f"{per_model_metrics['xgb']['brier']:.8f} "
+            f"gain="
+            f"{xgb_bagging_gain:+.8f}"
+        )
+
+        del (
+            xgb_models,
+            xgb_single_prediction,
+        )
+
         gc.collect()
 
         # --------------------------------------------------------
@@ -368,6 +411,9 @@ def run_temporal_validation(
                 "n_valid": int(
                     len(fold.valid_idx)
                 ),
+                "xgb_bagging_ablation": (
+                    xgb_bagging_ablation
+                ),
             }
         )
 
@@ -450,6 +496,11 @@ def run_temporal_validation(
                 "models": fold["metrics"],
                 "entity_ablation": fold["entity_ablation"],
                 "ensemble": ensemble_metrics,
+                "xgb_bagging_ablation": (
+                    fold[
+                        "xgb_bagging_ablation"
+                    ]
+                ),                
             }
         )
 
@@ -654,6 +705,42 @@ def run_temporal_validation(
         else None
     )
 
+    xgb_bagging_2024_gain = float(
+        by_label[
+            "2024"
+        ][
+            "xgb_bagging_ablation"
+        ][
+            "brier_gain"
+        ]
+    )
+
+    xgb_bagging_late_gain = float(
+        by_label[
+            "2024_late_abs"
+        ][
+            "xgb_bagging_ablation"
+        ][
+            "brier_gain"
+        ]
+    )
+
+    forward_brier = float(
+        weight_report[
+            "forward_weighted_brier"
+        ]
+    )
+
+    previous_forward_brier = float(
+        config
+        .submission_gate_previous_forward_brier
+    )
+
+    forward_improvement = float(
+        previous_forward_brier
+        - forward_brier
+    )
+
     checks = {
         "shrinkage_selection": bool(
             weight_report[
@@ -716,6 +803,26 @@ def run_temporal_validation(
             >= config
             .submission_gate_entity_late_min_gain
         ),
+        "xgb_bagging_2024": (
+            xgb_bagging_2024_gain
+            + 1.0e-15
+            >= config
+            .submission_gate_xgb_bagging_2024_min_gain
+        ),
+
+        "xgb_bagging_late": (
+            xgb_bagging_late_gain
+            + 1.0e-15
+            >= config
+            .submission_gate_xgb_bagging_late_min_gain
+        ),
+
+        "beats_previous_forward_objective": (
+            forward_improvement
+            + 1.0e-15
+            >= config
+            .submission_gate_min_forward_improvement
+        ),        
     }
 
     report[
@@ -799,6 +906,25 @@ def run_temporal_validation(
             "entity_late_xgb_brier_gain": (
                 entity_late_gain
             ),
+            "xgb_bagging_2024_gain": (
+                xgb_bagging_2024_gain
+            ),
+
+            "xgb_bagging_late_gain": (
+                xgb_bagging_late_gain
+            ),
+
+            "forward_weighted_brier": (
+                forward_brier
+            ),
+
+            "previous_forward_brier": (
+                previous_forward_brier
+            ),
+
+            "forward_improvement": (
+                forward_improvement
+            ),            
         },
 
         "thresholds": {
@@ -836,6 +962,20 @@ def run_temporal_validation(
                 config
                 .submission_gate_entity_late_min_gain
             ),
+            "xgb_bagging_2024_min_gain": (
+                config
+                .submission_gate_xgb_bagging_2024_min_gain
+            ),
+
+            "xgb_bagging_late_min_gain": (
+                config
+                .submission_gate_xgb_bagging_late_min_gain
+            ),
+
+            "minimum_forward_improvement": (
+                config
+                .submission_gate_min_forward_improvement
+            ),            
         },
     }
     return ensemble_state, report
@@ -860,18 +1000,79 @@ def train_and_save_final_models(
     )
     X = preprocessor.fit_transform(features)
 
-    xgb_rounds = int(ensemble_state["final_iterations"]["xgb"])
-    print(f"[FINAL] Training XGBoost for {xgb_rounds} rounds...")
-    xgb_model = train_xgboost_full(
-        X,
-        y,
-        sample_weight,
-        config.models,
-        num_boost_round=xgb_rounds,
+    xgb_rounds = int(
+        ensemble_state[
+            "final_iterations"
+        ]["xgb"]
     )
-    xgb_path = model_dir / "xgb_model.json"
-    xgb_model.save_model(str(xgb_path))
-    del xgb_model
+
+    print(
+        "[FINAL] Training "
+        "3-seed XGBoost bag "
+        f"for {xgb_rounds} rounds..."
+    )
+
+    xgb_models = (
+        train_xgboost_full_bagged(
+            X,
+            y,
+            sample_weight,
+            config.models,
+            num_boost_round=(
+                xgb_rounds
+            ),
+        )
+    )
+
+    xgb_seeds = tuple(
+        int(seed)
+        for seed
+        in config.models
+        .xgb_bagging_seeds
+    )
+
+    if len(xgb_models) != len(
+        xgb_seeds
+    ):
+        raise RuntimeError(
+            "Unexpected number of "
+            "XGBoost bagging models."
+        )
+
+    xgb_paths = []
+
+    for index, (
+        seed,
+        model,
+    ) in enumerate(
+        zip(
+            xgb_seeds,
+            xgb_models,
+        )
+    ):
+        filename = (
+            "xgb_model.json"
+            if index == 0
+            else (
+                f"xgb_model_seed"
+                f"{seed}.json"
+            )
+        )
+
+        path = (
+            model_dir
+            / filename
+        )
+
+        model.save_model(
+            str(path)
+        )
+
+        xgb_paths.append(
+            path
+        )
+
+    del xgb_models
     gc.collect()
 
     lgb_rounds = int(
@@ -977,6 +1178,18 @@ def train_and_save_final_models(
             "target_mean": float(y.mean()),
             "random_seed": int(config.models.random_seed),
         },
+        "xgb_bagging": {
+            "seeds": [
+                int(seed)
+                for seed
+                in xgb_seeds
+            ],
+            "model_files": [
+                path.name
+                for path
+                in xgb_paths
+            ],
+        },        
     }
     bundle_path = model_dir / "bundle.pkl"
     joblib.dump(bundle, bundle_path, compress=3)
@@ -990,7 +1203,11 @@ def train_and_save_final_models(
         "final_iterations": dict(ensemble_state["final_iterations"]),
         "n_features": int(len(preprocessor.feature_names_)),
         "model_files": [
-            xgb_path.name,
+            *[
+                path.name
+                for path
+                in xgb_paths
+            ],
             lgb_path.name,
             cat_path.name,
             *[
@@ -999,6 +1216,18 @@ def train_and_save_final_models(
             ],
             bundle_path.name,
         ],
+        "xgb_bagging": {
+            "seeds": [
+                int(seed)
+                for seed
+                in xgb_seeds
+            ],
+            "model_files": [
+                path.name
+                for path
+                in xgb_paths
+            ],
+        },        
     }
     with open(model_dir / "manifest.json", "w", encoding="utf-8") as handle:
         json.dump(manifest, handle, indent=2, ensure_ascii=False)

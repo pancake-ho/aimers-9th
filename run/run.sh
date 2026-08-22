@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-#SBATCH -J ensemble-v10
+#SBATCH -J ensemble-v11
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-gpu=16
 #SBATCH --mem-per-gpu=29G
@@ -216,6 +216,10 @@ mkdir -p \
 
 export TMPDIR="${JOB_ROOT}/tmp"
 export XDG_CACHE_HOME="${JOB_ROOT}/cache"
+export MPLCONFIGDIR="${JOB_ROOT}/cache/matplotlib"
+
+mkdir -p \
+    "${MPLCONFIGDIR}"
 export JOBLIB_TEMP_FOLDER="${JOB_ROOT}/tmp"
 
 export PYTHONUNBUFFERED=1
@@ -530,7 +534,7 @@ if [[ "${GPU_READY}" -ne 1 ]]; then
 fi
 
 echo "[GPU] Functional CUDA backend confirmed."
-echo "[MODE] xgb+lgb+cat+resnet+ft_transformer calibrated-shrink-v10"
+echo "[MODE] xgb-bag3+lgb+cat+resnet+ft_transformer calibrated-shrink-v11"
 
 
 # ============================================================
@@ -604,6 +608,7 @@ echo "[PREFLIGHT] Exercising source contracts"
         tests.test_neural_config_alignment \
         tests.test_neural_contract \
         tests.test_calibration_shrinkage \
+        tests.test_xgb_bagging_contract \
         -q
 )
 

@@ -143,47 +143,128 @@ def _validate_inputs(
         )
 
 
-def _load_gbdt_models():
-    xgb_path = (
-        MODEL_DIR / "xgb_model.json"
+def _load_gbdt_models(
+    bundle,
+):
+    bagging_state = (
+        bundle.get(
+            "xgb_bagging",
+            {},
+        )
     )
+
+    xgb_files = list(
+        bagging_state.get(
+            "model_files",
+            [
+                "xgb_model.json",
+            ],
+        )
+    )
+
+    xgb_seeds = list(
+        bagging_state.get(
+            "seeds",
+            [],
+        )
+    )
+
+    if not xgb_files:
+        raise ValueError(
+            "XGBoost model file list "
+            "must not be empty."
+        )
+
+    if (
+        xgb_files[0]
+        != "xgb_model.json"
+    ):
+        raise ValueError(
+            "First XGBoost model must "
+            "be xgb_model.json."
+        )
+
+    if (
+        xgb_seeds
+        and len(xgb_seeds)
+        != len(xgb_files)
+    ):
+        raise ValueError(
+            "XGBoost seed/model count "
+            "mismatch."
+        )
+
+    xgb_models = []
+
+    for filename in xgb_files:
+        path = (
+            MODEL_DIR
+            / filename
+        )
+
+        if not path.exists():
+            raise FileNotFoundError(
+                path
+            )
+
+        model = xgb.Booster()
+
+        model.load_model(
+            str(path)
+        )
+
+        model.set_param(
+            {
+                "nthread": 6,
+                "device": "cpu",
+            }
+        )
+
+        xgb_models.append(
+            model
+        )
+
     lgb_path = (
-        MODEL_DIR / "lgb_model.txt"
+        MODEL_DIR
+        / "lgb_model.txt"
     )
+
     cat_path = (
-        MODEL_DIR / "cat_model.cbm"
+        MODEL_DIR
+        / "cat_model.cbm"
     )
 
     for path in (
-        xgb_path,
         lgb_path,
         cat_path,
     ):
         if not path.exists():
-            raise FileNotFoundError(path)
-
-    xgb_model = xgb.Booster()
-    xgb_model.load_model(
-        str(xgb_path)
-    )
-    xgb_model.set_param(
-        {
-            "nthread": 6,
-            "device": "cpu",
-        }
-    )
+            raise FileNotFoundError(
+                path
+            )
 
     lgb_model = lgb.Booster(
-        model_file=str(lgb_path)
+        model_file=str(
+            lgb_path
+        )
     )
 
-    cat_model = CatBoostClassifier()
+    cat_model = (
+        CatBoostClassifier()
+    )
+
     cat_model.load_model(
         str(cat_path)
     )
 
+    print(
+        "[XGB-BAG] loaded_models="
+        f"{len(xgb_models)} "
+        f"seeds={xgb_seeds}"
+    )
+
     return (
-        xgb_model,
+        xgb_models,
         lgb_model,
         cat_model,
     )
@@ -304,19 +385,37 @@ def main() -> None:
     )
 
     (
-        xgb_model,
+        xgb_models,
         lgb_model,
         cat_model,
-    ) = _load_gbdt_models()
+    ) = _load_gbdt_models(
+        bundle
+    )
 
     dtest = xgb.DMatrix(
         X,
         feature_names=list(X.columns),
     )
 
-    xgb_prediction = np.asarray(
-        xgb_model.predict(dtest),
-        dtype=np.float64,
+    xgb_seed_predictions = [
+        np.asarray(
+            model.predict(
+                dtest
+            ),
+            dtype=np.float64,
+        )
+        for model
+        in xgb_models
+    ]
+
+    xgb_prediction = (
+        np.mean(
+            np.vstack(
+                xgb_seed_predictions
+            ),
+            axis=0,
+            dtype=np.float64,
+        )
     )
 
     lgb_prediction = np.asarray(
@@ -343,7 +442,8 @@ def main() -> None:
 
     del (
         dtest,
-        xgb_model,
+        xgb_models,
+        xgb_seed_predictions,
         lgb_model,
         cat_model,
     )
