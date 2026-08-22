@@ -19,6 +19,7 @@ class OptionalNeuralSubmissionTests(
         | None = None,
         *,
         xgb_multiview: bool = False,
+        xgb_temporal: bool = False,
     ) -> dict[str, Path]:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(
@@ -87,6 +88,33 @@ class OptionalNeuralSubmissionTests(
                     "representation_raw_feature_count": 92,
 
                     "pca_component_count": 8,
+                }
+            
+            if xgb_temporal:
+                manifest[
+                    "xgb_temporal_views"
+                ] = {
+                    "view_order": [
+                        "base",
+                        "recent1",
+                        "recent2",
+                    ],
+
+                    "weights": [
+                        0.5,
+                        0.25,
+                        0.25,
+                    ],
+
+                    "model_files": {
+                        "recent1": (
+                            "xgb_recent1.json"
+                        ),
+
+                        "recent2": (
+                            "xgb_recent2.json"
+                        ),
+                    },
                 }
 
             (
@@ -190,6 +218,35 @@ class OptionalNeuralSubmissionTests(
             files,
         )
 
+    def test_xgb_temporal_artifacts_are_packaged(
+        self,
+    ) -> None:
+        files = self._required_files_for(
+            [
+                "xgb",
+                "lgb",
+                "cat",
+                "resnet",
+                "ft_transformer",
+            ],
+            xgb_model_files=[
+                "xgb_model.json",
+                "xgb_model_seed2027.json",
+                "xgb_model_seed2028.json",
+            ],
+            xgb_temporal=True,
+        )
+
+        self.assertIn(
+            "model/xgb_recent1.json",
+            files,
+        )
+
+        self.assertIn(
+            "model/xgb_recent2.json",
+            files,
+        )
+        
     def test_gbdt_fallback_archive_does_not_require_neural_files(
         self,
     ) -> None:

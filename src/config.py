@@ -194,6 +194,43 @@ class ModelConfig:
     xgb_multiview_protected_tolerance: float = (
         1.0e-5
     )
+
+    # --------------------------------------------------------
+    # V13 temporal-distribution XGBoost experts.
+    #
+    # Unlike the failed PCA/frequency views, these models
+    # intentionally learn the feature -> target mapping from
+    # different strictly-past time regimes.
+    # --------------------------------------------------------
+
+    xgb_temporal_enabled: bool = True
+
+    xgb_temporal_recent1_seasons: int = 1
+
+    xgb_temporal_recent2_seasons: int = 2
+
+    xgb_temporal_recent1_seed: int = 5026
+
+    xgb_temporal_recent2_seed: int = 6026
+
+    xgb_temporal_grid_step: float = 0.025
+
+    # Aggressive enough to allow a strong recent expert
+    # to materially change predictions.
+    xgb_temporal_minimum_base_weight: float = (
+        0.30
+    )
+
+    xgb_temporal_maximum_aux_weight: float = (
+        0.60
+    )
+
+    # Neither 2024 protected regime may become worse
+    # at the logical-XGB layer.
+    xgb_temporal_protected_tolerance: float = (
+        0.0
+    )
+    
     # ------------------------------------------------------------
     # XGBoost
     # ------------------------------------------------------------

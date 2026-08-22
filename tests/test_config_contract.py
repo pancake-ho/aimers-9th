@@ -212,6 +212,41 @@ class ConfigContractTests(
             .xgb_multiview_pca_components,
             8,
         )
+        
+        self.assertTrue(
+            config.models
+            .xgb_temporal_enabled
+        )
+
+        self.assertEqual(
+            config.models
+            .xgb_temporal_recent1_seasons,
+            1,
+        )
+
+        self.assertEqual(
+            config.models
+            .xgb_temporal_recent2_seasons,
+            2,
+        )
+
+        self.assertEqual(
+            config.models
+            .xgb_temporal_grid_step,
+            0.025,
+        )
+
+        self.assertEqual(
+            config.models
+            .xgb_temporal_minimum_base_weight,
+            0.30,
+        )
+
+        self.assertEqual(
+            config.models
+            .xgb_temporal_maximum_aux_weight,
+            0.60,
+        )
 
         self.assertEqual(
             (

@@ -30,10 +30,17 @@ from src.models import (
     train_xgboost_full_bagged,
     train_xgboost_multiview_fold,
     train_xgboost_multiview_full,
+    train_xgboost_temporal_fold,
+    train_xgboost_temporal_full,    
 )
 from src.xgb_multiview import (
     blend_xgb_views,
     select_xgb_multiview_weights,
+)
+from src.xgb_temporal import (
+    blend_temporal_views,
+    recent_window_positions,
+    select_temporal_view_weights,
 )
 from src.preprocessing import TabularPreprocessor
 from src.runtime import apply_logit_intercept, blend_predictions
@@ -85,10 +92,10 @@ def _strategy_name(
         "ft_transformer",
     ):
         return (
-            "temporal_xgb_multiview_"
-            "bag3_repr100_reweight_"
+            "temporal_xgb_timeviews_"
+            "bag3_recent1_recent2_"
             "lgb_cat_resnet_ftt_"
-            "fixedchamp_calibrated_v12"
+            "fixedchamp_calibrated_v13"
         )
 
     raise ValueError(
@@ -370,6 +377,215 @@ def run_temporal_validation(
             xgb_single_prediction,
         )
 
+        # ----------------------------------------------------
+        # V13 temporal-distribution XGBoost experts.
+        # ----------------------------------------------------
+
+        fold_train_seasons = (
+            pd.to_numeric(
+                train.iloc[
+                    fold.train_idx
+                ]["season"],
+                errors="raise",
+            )
+            .to_numpy(
+                dtype=np.int16,
+                copy=True,
+            )
+        )
+
+        (
+            recent1_positions,
+            recent1_window,
+        ) = (
+            recent_window_positions(
+                fold_train_seasons,
+                n_seasons=(
+                    config.models
+                    .xgb_temporal_recent1_seasons
+                ),
+            )
+        )
+
+        (
+            recent2_positions,
+            recent2_window,
+        ) = (
+            recent_window_positions(
+                fold_train_seasons,
+                n_seasons=(
+                    config.models
+                    .xgb_temporal_recent2_seasons
+                ),
+            )
+        )
+
+        temporal_views = {
+            "base": (
+                predictions[
+                    "xgb"
+                ].copy()
+            ),
+        }
+
+        temporal_view_metrics = {}
+
+        # ---------------- recent1 ----------------
+
+        start = time.perf_counter()
+
+        (
+            recent1_model,
+            recent1_prediction,
+            recent1_rounds,
+        ) = (
+            train_xgboost_temporal_fold(
+                X_train.iloc[
+                    recent1_positions
+                ],
+                y_train[
+                    recent1_positions
+                ],
+                X_valid,
+                y_valid,
+                sample_weight[
+                    recent1_positions
+                ],
+                config.models,
+                seed=(
+                    config.models
+                    .xgb_temporal_recent1_seed
+                ),
+            )
+        )
+
+        recent1_seconds = (
+            time.perf_counter()
+            - start
+        )
+
+        temporal_views[
+            "recent1"
+        ] = recent1_prediction
+
+        temporal_view_metrics[
+            "recent1"
+        ] = evaluate_probabilities(
+            y_valid,
+            recent1_prediction,
+        )
+
+        temporal_view_metrics[
+            "recent1"
+        ][
+            "train_seconds"
+        ] = float(
+            recent1_seconds
+        )
+
+        best_iterations[
+            "xgb_recent1"
+        ] = int(
+            recent1_rounds
+        )
+
+        del recent1_model
+
+        # ---------------- recent2 ----------------
+
+        start = time.perf_counter()
+
+        (
+            recent2_model,
+            recent2_prediction,
+            recent2_rounds,
+        ) = (
+            train_xgboost_temporal_fold(
+                X_train.iloc[
+                    recent2_positions
+                ],
+                y_train[
+                    recent2_positions
+                ],
+                X_valid,
+                y_valid,
+                sample_weight[
+                    recent2_positions
+                ],
+                config.models,
+                seed=(
+                    config.models
+                    .xgb_temporal_recent2_seed
+                ),
+            )
+        )
+
+        recent2_seconds = (
+            time.perf_counter()
+            - start
+        )
+
+        temporal_views[
+            "recent2"
+        ] = recent2_prediction
+
+        temporal_view_metrics[
+            "recent2"
+        ] = evaluate_probabilities(
+            y_valid,
+            recent2_prediction,
+        )
+
+        temporal_view_metrics[
+            "recent2"
+        ][
+            "train_seconds"
+        ] = float(
+            recent2_seconds
+        )
+
+        best_iterations[
+            "xgb_recent2"
+        ] = int(
+            recent2_rounds
+        )
+
+        del recent2_model
+
+        temporal_view_metrics[
+            "base"
+        ] = evaluate_probabilities(
+            y_valid,
+            temporal_views[
+                "base"
+            ],
+        )
+
+        for (
+            view_name,
+            view_metrics,
+        ) in temporal_view_metrics.items():
+            _print_metrics(
+                (
+                    f"{fold.validation_label}"
+                    f"/xgb_temporal_{view_name}"
+                ),
+                view_metrics,
+            )
+
+        print(
+            "[XGB-TEMPORAL] "
+            f"fold={fold.validation_label} "
+            f"recent1_seasons="
+            f"{recent1_window['selected_seasons']} "
+            f"recent1_rows="
+            f"{recent1_window['n_rows']:,} "
+            f"recent2_seasons="
+            f"{recent2_window['selected_seasons']} "
+            f"recent2_rows="
+            f"{recent2_window['n_rows']:,}"
+        )
+
         gc.collect()
 
         # --------------------------------------------------------
@@ -531,6 +747,23 @@ def run_temporal_validation(
                         xgb_view_metrics
                     ),                    
                 },
+                "xgb_temporal_views": (
+                    temporal_views
+                ),
+
+                "xgb_temporal_fold_state": {
+                    "recent1_window": (
+                        recent1_window
+                    ),
+
+                    "recent2_window": (
+                        recent2_window
+                    ),
+
+                    "view_metrics": (
+                        temporal_view_metrics
+                    ),
+                },
             }
         )
 
@@ -596,6 +829,115 @@ def run_temporal_validation(
         ][
             "xgb"
         ] = upgraded
+
+    # --------------------------------------------------------
+    # V13 temporal-view selection.
+    #
+    # The base is the already validated bag3/feature-view
+    # logical XGB.  recent1/recent2 then compete against it.
+    # --------------------------------------------------------
+
+    for fold in fold_results:
+        fold[
+            "xgb_temporal_views"
+        ][
+            "base"
+        ] = (
+            fold[
+                "predictions"
+            ][
+                "xgb"
+            ].copy()
+        )
+
+    (
+        temporal_weights,
+        temporal_report,
+    ) = (
+        select_temporal_view_weights(
+            fold_results,
+            fold_importance=(
+                config
+                .temporal_fold_importance
+            ),
+
+            grid_step=(
+                config.models
+                .xgb_temporal_grid_step
+            ),
+
+            minimum_base_weight=(
+                config.models
+                .xgb_temporal_minimum_base_weight
+            ),
+
+            maximum_aux_weight=(
+                config.models
+                .xgb_temporal_maximum_aux_weight
+            ),
+
+            protected_labels=(
+                "2024",
+                "2024_late_abs",
+            ),
+
+            protected_tolerance=(
+                config.models
+                .xgb_temporal_protected_tolerance
+            ),
+        )
+    )
+
+    print(
+        "[XGB-TEMPORAL-SELECT] "
+        f"weights="
+        f"{temporal_weights.tolist()} "
+        f"forward_brier="
+        f"{temporal_report['forward_weighted_brier']:.8f} "
+        f"gains="
+        f"{temporal_report['gain_vs_base']}"
+    )
+
+    for fold in fold_results:
+        temporal_prediction = (
+            blend_temporal_views(
+                fold[
+                    "xgb_temporal_views"
+                ],
+                temporal_weights,
+            )
+        )
+
+        fold[
+            "predictions"
+        ][
+            "xgb"
+        ] = temporal_prediction
+
+        fold[
+            "metrics"
+        ][
+            "xgb"
+        ] = (
+            evaluate_probabilities(
+                fold[
+                    "y_true"
+                ],
+                temporal_prediction,
+            )
+        )
+
+        _print_metrics(
+            (
+                f"{fold['validation_label']}"
+                "/xgb_temporal_blend"
+            ),
+            fold[
+                "metrics"
+            ][
+                "xgb"
+            ],
+        )
 
         fold[
             "metrics"
@@ -765,6 +1107,42 @@ def run_temporal_validation(
             )
         ),
     }
+
+    final_iterations[
+        "xgb_recent1"
+    ] = int(
+        min(
+            config.models
+            .xgb_num_boost_round,
+            max(
+                30,
+                round(
+                    recent_iterations[
+                        "xgb_recent1"
+                    ]
+                    * 1.05
+                ),
+            ),
+        )
+    )
+
+    final_iterations[
+        "xgb_recent2"
+    ] = int(
+        min(
+            config.models
+            .xgb_num_boost_round,
+            max(
+                30,
+                round(
+                    recent_iterations[
+                        "xgb_recent2"
+                    ]
+                    * 1.05
+                ),
+            ),
+        )
+    )
     neural_epoch_caps = {
         "resnet": int(config.neural.resnet_max_epochs),
         "ft_transformer": int(config.neural.ft_max_epochs),
@@ -807,6 +1185,21 @@ def run_temporal_validation(
                 xgb_view_report
             ),
         },
+        "xgb_temporal_views": {
+            "view_order": (
+                temporal_report[
+                    "view_order"
+                ]
+            ),
+
+            "weights": (
+                temporal_weights.tolist()
+            ),
+
+            "validation": (
+                temporal_report
+            ),
+        },        
     }
     report = {
         "strategy": _strategy_name(model_order),
@@ -818,6 +1211,9 @@ def run_temporal_validation(
         "xgb_multiview": (
             xgb_view_report
         ),
+        "xgb_temporal_views": (
+            temporal_report
+        ),        
     }
     by_label = {
         item["validation_label"]: item
@@ -1487,6 +1883,135 @@ def train_and_save_final_models(
     del xgb_models
     gc.collect()
 
+    final_seasons = (
+        pd.to_numeric(
+            train["season"],
+            errors="raise",
+        )
+        .to_numpy(
+            dtype=np.int16,
+            copy=True,
+        )
+    )
+
+    (
+        recent1_positions,
+        recent1_window,
+    ) = recent_window_positions(
+        final_seasons,
+        n_seasons=(
+            config.models
+            .xgb_temporal_recent1_seasons
+        ),
+    )
+
+    (
+        recent2_positions,
+        recent2_window,
+    ) = recent_window_positions(
+        final_seasons,
+        n_seasons=(
+            config.models
+            .xgb_temporal_recent2_seasons
+        ),
+    )
+
+    print(
+        "[FINAL] Training temporal recent1 "
+        f"seasons="
+        f"{recent1_window['selected_seasons']} "
+        f"rows="
+        f"{recent1_window['n_rows']:,}"
+    )
+
+    recent1_model = (
+        train_xgboost_temporal_full(
+            X.iloc[
+                recent1_positions
+            ],
+            y[
+                recent1_positions
+            ],
+            sample_weight[
+                recent1_positions
+            ],
+            config.models,
+            seed=(
+                config.models
+                .xgb_temporal_recent1_seed
+            ),
+            num_boost_round=int(
+                ensemble_state[
+                    "final_iterations"
+                ][
+                    "xgb_recent1"
+                ]
+            ),
+        )
+    )
+
+    recent1_path = (
+        model_dir
+        / "xgb_recent1.json"
+    )
+
+    recent1_model.save_model(
+        str(
+            recent1_path
+        )
+    )
+
+    del recent1_model
+
+    print(
+        "[FINAL] Training temporal recent2 "
+        f"seasons="
+        f"{recent2_window['selected_seasons']} "
+        f"rows="
+        f"{recent2_window['n_rows']:,}"
+    )
+
+    recent2_model = (
+        train_xgboost_temporal_full(
+            X.iloc[
+                recent2_positions
+            ],
+            y[
+                recent2_positions
+            ],
+            sample_weight[
+                recent2_positions
+            ],
+            config.models,
+            seed=(
+                config.models
+                .xgb_temporal_recent2_seed
+            ),
+            num_boost_round=int(
+                ensemble_state[
+                    "final_iterations"
+                ][
+                    "xgb_recent2"
+                ]
+            ),
+        )
+    )
+
+    recent2_path = (
+        model_dir
+        / "xgb_recent2.json"
+    )
+
+    recent2_model.save_model(
+        str(
+            recent2_path
+        )
+    )
+
+    del recent2_model
+
+    gc.collect()
+
     lgb_rounds = int(
         ensemble_state[
             "final_iterations"
@@ -1641,6 +2166,39 @@ def train_and_save_final_models(
                 representative_diagnostics
             ),
         },
+        "xgb_temporal_views": {
+            "view_order": [
+                "base",
+                "recent1",
+                "recent2",
+            ],
+
+            "weights": (
+                ensemble_state[
+                    "xgb_temporal_views"
+                ][
+                    "weights"
+                ]
+            ),
+
+            "model_files": {
+                "recent1": (
+                    recent1_path.name
+                ),
+
+                "recent2": (
+                    recent2_path.name
+                ),
+            },
+
+            "recent1_window": (
+                recent1_window
+            ),
+
+            "recent2_window": (
+                recent2_window
+            ),
+        },        
     }
     bundle_path = model_dir / "bundle.pkl"
     joblib.dump(bundle, bundle_path, compress=3)
@@ -1674,6 +2232,8 @@ def train_and_save_final_models(
             bundle_path.name,
             "xgb_representation.json",
             "xgb_representative.json",
+            recent1_path.name,
+            recent2_path.name,            
         ],
         "xgb_bagging": {
             "seeds": [
@@ -1730,7 +2290,32 @@ def train_and_save_final_models(
                 config.models
                 .xgb_multiview_pca_components
             ),
-        },        
+        }, 
+        "xgb_temporal_views": {
+            "view_order": [
+                "base",
+                "recent1",
+                "recent2",
+            ],
+
+            "weights": list(
+                ensemble_state[
+                    "xgb_temporal_views"
+                ][
+                    "weights"
+                ]
+            ),
+
+            "model_files": {
+                "recent1": (
+                    recent1_path.name
+                ),
+
+                "recent2": (
+                    recent2_path.name
+                ),
+            },
+        },              
     }
     with open(model_dir / "manifest.json", "w", encoding="utf-8") as handle:
         json.dump(manifest, handle, indent=2, ensure_ascii=False)

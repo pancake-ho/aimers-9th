@@ -28,6 +28,9 @@ from src.xgb_multiview import (
     fit_numeric_pca_state,
     make_representative_sample_weight,
 )
+from src.xgb_temporal import (
+    recent_window_positions,
+)
 
 
 GBDT_MODEL_ORDER = ("xgb", "lgb", "cat")
@@ -331,6 +334,140 @@ def train_xgboost_fold(
         np.asarray(prediction, dtype=np.float64),
         best_iteration + 1,
     )
+
+
+def train_xgboost_temporal_fold(
+    X_train: pd.DataFrame,
+    y_train: np.ndarray,
+    X_valid: pd.DataFrame,
+    y_valid: np.ndarray,
+    sample_weight: np.ndarray,
+    config: ModelConfig,
+    *,
+    seed: int,
+):
+    dtrain = _quantile_dmatrix(
+        X_train,
+        config,
+        label=y_train,
+        weight=sample_weight,
+    )
+
+    dvalid = _quantile_dmatrix(
+        X_valid,
+        config,
+        label=y_valid,
+        ref=dtrain,
+    )
+
+    model = xgb.train(
+        params=_xgb_params(
+            config,
+            seed=int(seed),
+        ),
+        dtrain=dtrain,
+        num_boost_round=(
+            config.xgb_num_boost_round
+        ),
+        evals=[
+            (
+                dvalid,
+                "valid",
+            )
+        ],
+        custom_metric=(
+            _xgb_brier_metric
+        ),
+        maximize=False,
+        early_stopping_rounds=(
+            config
+            .xgb_early_stopping_rounds
+        ),
+        verbose_eval=False,
+    )
+
+    best_iteration = (
+        int(
+            model.best_iteration
+        )
+        if model.best_iteration
+        is not None
+        else (
+            config.xgb_num_boost_round
+            - 1
+        )
+    )
+
+    rounds = (
+        best_iteration + 1
+    )
+
+    prediction = np.asarray(
+        model.predict(
+            dvalid,
+            iteration_range=(
+                0,
+                rounds,
+            ),
+        ),
+        dtype=np.float64,
+    )
+
+    if not np.isfinite(
+        prediction
+    ).all():
+        raise RuntimeError(
+            "Temporal XGBoost produced "
+            "non-finite predictions."
+        )
+
+    del (
+        dtrain,
+        dvalid,
+    )
+
+    gc.collect()
+
+    return (
+        model,
+        prediction,
+        int(rounds),
+    )
+
+
+def train_xgboost_temporal_full(
+    X_train: pd.DataFrame,
+    y_train: np.ndarray,
+    sample_weight: np.ndarray,
+    config: ModelConfig,
+    *,
+    seed: int,
+    num_boost_round: int,
+):
+    dtrain = _quantile_dmatrix(
+        X_train,
+        config,
+        label=y_train,
+        weight=sample_weight,
+    )
+
+    model = xgb.train(
+        params=_xgb_params(
+            config,
+            seed=int(seed),
+        ),
+        dtrain=dtrain,
+        num_boost_round=int(
+            num_boost_round
+        ),
+        verbose_eval=False,
+    )
+
+    del dtrain
+    gc.collect()
+
+    return model
+
 
 
 def train_xgboost_bagged_fold(

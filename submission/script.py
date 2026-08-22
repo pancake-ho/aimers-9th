@@ -612,6 +612,92 @@ def main() -> None:
             drepresentation,
             pca,
         )
+        
+    temporal_state = (
+        bundle.get(
+            "xgb_temporal_views"
+        )
+    )
+
+    if temporal_state:
+        temporal_files = dict(
+            temporal_state[
+                "model_files"
+            ]
+        )
+
+        temporal_predictions = [
+            xgb_prediction
+        ]
+
+        for name in (
+            "recent1",
+            "recent2",
+        ):
+            filename = str(
+                temporal_files[
+                    name
+                ]
+            )
+
+            path = (
+                MODEL_DIR
+                / filename
+            )
+
+            if not path.exists():
+                raise FileNotFoundError(
+                    path
+                )
+
+            temporal_model = (
+                xgb.Booster()
+            )
+
+            temporal_model.load_model(
+                str(
+                    path
+                )
+            )
+
+            temporal_model.set_param(
+                {
+                    "nthread": 6,
+                    "device": "cpu",
+                }
+            )
+
+            temporal_prediction = (
+                np.asarray(
+                    temporal_model.predict(
+                        dtest
+                    ),
+                    dtype=np.float64,
+                )
+            )
+
+            temporal_predictions.append(
+                temporal_prediction
+            )
+
+            del temporal_model
+
+        xgb_prediction = (
+            runtime.blend_predictions(
+                temporal_predictions,
+                temporal_state[
+                    "weights"
+                ],
+            )
+        )
+
+        print(
+            "[XGB-TEMPORAL] "
+            f"weights="
+            f"{temporal_state['weights']}"
+        )
+
+        del temporal_predictions        
 
     lgb_prediction = np.asarray(
         lgb_model.predict(

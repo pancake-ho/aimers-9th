@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-#SBATCH -J ensemble-v12mv
+#SBATCH -J ensemble-v13tv
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-gpu=16
 #SBATCH --mem-per-gpu=29G
@@ -534,7 +534,7 @@ if [[ "${GPU_READY}" -ne 1 ]]; then
 fi
 
 echo "[GPU] Functional CUDA backend confirmed."
-echo "[MODE] xgb-multiview-bag3+lgb+cat+resnet+ftt fixedchamp-calibrated-v12"
+echo "[MODE] xgb-temporalviews-bag3+lgb+cat+resnet+ftt fixedchamp-calibrated-v13"
 
 
 # ============================================================
@@ -613,6 +613,7 @@ echo "[PREFLIGHT] Exercising source contracts"
         tests.test_fixed_champion_ensemble \
         tests.test_artifact_policy \
         tests.test_xgb_multiview \
+        tests.test_xgb_temporal \
         -q
 )
 

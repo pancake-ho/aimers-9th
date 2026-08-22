@@ -171,6 +171,51 @@ def _required_files() -> dict[str, Path]:
                 / filename
             )
 
+    xgb_temporal = (
+        manifest.get(
+            "xgb_temporal_views"
+        )
+    )
+
+    if xgb_temporal:
+        temporal_files = dict(
+            xgb_temporal[
+                "model_files"
+            ]
+        )
+
+        for name in (
+            "recent1",
+            "recent2",
+        ):
+            filename = str(
+                temporal_files[
+                    name
+                ]
+            )
+
+            path_name = Path(
+                filename
+            )
+
+            if (
+                path_name.name
+                != filename
+                or path_name.suffix
+                != ".json"
+            ):
+                raise ValueError(
+                    "Invalid temporal XGB "
+                    f"artifact: {filename}"
+                )
+
+            files[
+                f"model/{filename}"
+            ] = (
+                MODEL_DIR
+                / filename
+            )
+
     xgb_model_files = list(
         xgb_bagging.get(
             "model_files",
