@@ -808,6 +808,7 @@ def run_temporal_validation(
             >= config
             .submission_gate_entity_late_min_gain
         ),
+
         "xgb_bagging_2024": (
             xgb_bagging_2024_gain
             + 1.0e-15
@@ -828,6 +829,7 @@ def run_temporal_validation(
             >= config
             .submission_gate_min_forward_improvement
         ),
+
         "beats_previous_2024_raw": (
             champion_2024_gain
             + 1.0e-15
@@ -840,29 +842,30 @@ def run_temporal_validation(
             + 1.0e-15
             >= config
             .submission_gate_previous_late_calibrated_min_gain
-        ),              
+        ),
     }
 
-    report[
-        "artifact_recommendation"
-    ] = {
-        "quality_gate_passed": bool(
-            report[
-                "submission_gate"
-            ]["passed"]
-        ),
-        "quality_gate_is_advisory": True,
-        "package_artifact": True,
-    }
+    # --------------------------------------------------------
+    # Build quality-gate result first.
+    #
+    # IMPORTANT:
+    # Do not read report["submission_gate"] before assigning it.
+    #
+    # Quality thresholds are advisory in the default production
+    # path. scripts/train_submit.py decides whether a failed gate
+    # blocks packaging; --require-quality-gate enables strict mode.
+    # --------------------------------------------------------
+
+    gate_passed = bool(
+        all(
+            checks.values()
+        )
+    )
 
     report[
         "submission_gate"
     ] = {
-        "passed": bool(
-            all(
-                checks.values()
-            )
-        ),
+        "passed": gate_passed,
 
         "checks": checks,
 
@@ -936,6 +939,7 @@ def run_temporal_validation(
             "entity_late_xgb_brier_gain": (
                 entity_late_gain
             ),
+
             "xgb_bagging_2024_gain": (
                 xgb_bagging_2024_gain
             ),
@@ -954,7 +958,8 @@ def run_temporal_validation(
 
             "forward_improvement": (
                 forward_improvement
-            ),     
+            ),
+
             "previous_2024_raw_brier": (
                 previous_2024_raw_brier
             ),
@@ -969,7 +974,7 @@ def run_temporal_validation(
 
             "champion_late_calibrated_gain": (
                 champion_late_calibrated_gain
-            ),                   
+            ),
         },
 
         "thresholds": {
@@ -1007,6 +1012,7 @@ def run_temporal_validation(
                 config
                 .submission_gate_entity_late_min_gain
             ),
+
             "xgb_bagging_2024_min_gain": (
                 config
                 .submission_gate_xgb_bagging_2024_min_gain
@@ -1020,7 +1026,8 @@ def run_temporal_validation(
             "minimum_forward_improvement": (
                 config
                 .submission_gate_min_forward_improvement
-            ),            
+            ),
+
             "previous_2024_min_gain": (
                 config
                 .submission_gate_previous_2024_min_gain
@@ -1029,9 +1036,27 @@ def run_temporal_validation(
             "previous_late_calibrated_min_gain": (
                 config
                 .submission_gate_previous_late_calibrated_min_gain
-            ),            
+            ),
         },
     }
+
+    # --------------------------------------------------------
+    # Informational recommendation only.
+    #
+    # Actual artifact policy belongs to scripts/train_submit.py.
+    # Default production behavior is package_always.
+    # --------------------------------------------------------
+
+    report[
+        "artifact_recommendation"
+    ] = {
+        "quality_gate_passed": (
+            gate_passed
+        ),
+        "quality_gate_is_advisory": True,
+        "package_artifact": True,
+    }
+
     return ensemble_state, report
 
 
