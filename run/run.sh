@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-#SBATCH -J ensemble-v11
+#SBATCH -J ensemble-v11b
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-gpu=16
 #SBATCH --mem-per-gpu=29G
@@ -611,6 +611,7 @@ echo "[PREFLIGHT] Exercising source contracts"
         tests.test_xgb_bagging_contract \
         tests.test_xgb_bagging_submission_contract \
         tests.test_fixed_champion_ensemble \
+        tests.test_artifact_policy \
         -q
 )
 

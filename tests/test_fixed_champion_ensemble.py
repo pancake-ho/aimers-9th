@@ -132,6 +132,20 @@ class FixedChampionEnsembleTests(
             ],
             0.0,
         )
+        self.assertNotIn(
+            "selected_alpha",
+            report,
+        )
+
+        self.assertNotIn(
+            "raw_optimal_weights",
+            report,
+        )
+
+        self.assertNotIn(
+            "reference_weights",
+            report,
+        )        
 
     def test_invalid_weight_sum_is_rejected(
         self,

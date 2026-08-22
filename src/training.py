@@ -448,22 +448,14 @@ def run_temporal_validation(
 
     print(
         "[ENSEMBLE-POLICY] "
-        "policy=fixed_v10_champion "
+        f"policy={weight_report['method']} "
         f"weights={weights.tolist()} "
         f"forward_brier="
-        f"{weight_report['forward_weighted_brier']:.8f}"
-    )
-
-    print(
-        "[SHRINKAGE] "
-        f"reference="
-        f"{weight_report['reference_model']} "
-        f"raw_optimal="
-        f"{weight_report['raw_optimal_weights']} "
-        f"selected_alpha="
-        f"{weight_report['selected_alpha']:.2f} "
-        f"final_weights="
-        f"{weight_report['weights']}"
+        f"{weight_report['forward_weighted_brier']:.8f} "
+        f"calibration_accepted="
+        f"{weight_report['calibration_accepted']} "
+        f"calibration_transfer_gain="
+        f"{weight_report['calibration_transfer_gain']:+.8f}"
     )
 
     fold_summaries = []
@@ -852,6 +844,18 @@ def run_temporal_validation(
     }
 
     report[
+        "artifact_recommendation"
+    ] = {
+        "quality_gate_passed": bool(
+            report[
+                "submission_gate"
+            ]["passed"]
+        ),
+        "quality_gate_is_advisory": True,
+        "package_artifact": True,
+    }
+
+    report[
         "submission_gate"
     ] = {
         "passed": bool(
@@ -872,7 +876,7 @@ def run_temporal_validation(
             "weights": list(
                 weights
             ),
-            
+
             "reference_model": (
                 reference_model
             ),
@@ -1222,6 +1226,12 @@ def train_and_save_final_models(
         "preprocessor_state": preprocessor.export_state(),
         "neural_preprocessor_state": neural_state,
         "ensemble": dict(ensemble_state),
+        "quality_assessment": dict(
+            ensemble_state.get(
+                "quality_assessment",
+                {},
+            )
+        ),        
         "training": {
             "train_seasons": [int(train["season"].min()), int(train["season"].max())],
             "n_rows": int(len(train)),
@@ -1252,6 +1262,12 @@ def train_and_save_final_models(
         "calibration": dict(ensemble_state["calibration"]),
         "final_iterations": dict(ensemble_state["final_iterations"]),
         "n_features": int(len(preprocessor.feature_names_)),
+        "quality_assessment": dict(
+            ensemble_state.get(
+                "quality_assessment",
+                {},
+            )
+        ),        
         "model_files": [
             *[
                 path.name

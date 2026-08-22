@@ -289,13 +289,13 @@ class RunScriptContractTests(
             script,
         )
 
-    def test_production_mode_declares_xgb_bag3_v11(
+    def test_production_mode_declares_xgb_bag3_v11b(
         self,
     ) -> None:
         script = self._script()
 
         self.assertIn(
-            "#SBATCH -J ensemble-v11",
+            "#SBATCH -J ensemble-v11b",
             script,
         )
 
@@ -304,15 +304,20 @@ class RunScriptContractTests(
                 "[MODE] "
                 "xgb-bag3+lgb+cat+resnet+"
                 "ft_transformer "
-                "calibrated-shrink-v11"
+                "fixedchamp-calibrated-v11b"
             ),
             script,
         )
 
         # Regression guards against accidentally
-        # launching an older production strategy.
+        # launching an obsolete strategy.
         self.assertNotIn(
             "calibrated-shrink-v10",
+            script,
+        )
+
+        self.assertNotIn(
+            "calibrated-shrink-v11",
             script,
         )
 
