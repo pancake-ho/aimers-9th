@@ -483,6 +483,135 @@ def main() -> None:
             dtest,
         )
     )
+    multiview = (
+        bundle.get(
+            "xgb_multiview"
+        )
+    )
+
+    if multiview:
+        representation_model = (
+            xgb.Booster()
+        )
+
+        representation_model.load_model(
+            str(
+                MODEL_DIR
+                / multiview[
+                    "representation_model_file"
+                ]
+            )
+        )
+
+        representation_model.set_param(
+            {
+                "nthread": 6,
+                "device": "cpu",
+            }
+        )
+
+        representative_model = (
+            xgb.Booster()
+        )
+
+        representative_model.load_model(
+            str(
+                MODEL_DIR
+                / multiview[
+                    "representative_model_file"
+                ]
+            )
+        )
+
+        representative_model.set_param(
+            {
+                "nthread": 6,
+                "device": "cpu",
+            }
+        )
+
+        pca = (
+            runtime
+            .apply_numeric_pca_state(
+                X,
+                multiview[
+                    "pca_state"
+                ],
+            )
+        )
+
+        representation_X = (
+            pd.concat(
+                [
+                    X[
+                        multiview[
+                            "representation_raw_features"
+                        ]
+                    ],
+                    pca,
+                ],
+                axis=1,
+            )
+        )
+
+        drepresentation = (
+            xgb.DMatrix(
+                representation_X,
+                feature_names=list(
+                    representation_X.columns
+                ),
+            )
+        )
+
+        representation_prediction = (
+            np.asarray(
+                representation_model.predict(
+                    drepresentation
+                ),
+                dtype=np.float64,
+            )
+        )
+
+        representative_prediction = (
+            np.asarray(
+                representative_model.predict(
+                    dtest
+                ),
+                dtype=np.float64,
+            )
+        )
+
+        xgb_prediction = (
+            runtime
+            .blend_predictions(
+                [
+                    xgb_prediction,
+                    representation_prediction,
+                    representative_prediction,
+                ],
+                multiview[
+                    "weights"
+                ],
+            )
+        )
+
+        print(
+            "[XGB-MULTIVIEW] "
+            f"weights="
+            f"{multiview['weights']} "
+            f"repr_features="
+            f"{representation_X.shape[1]}"
+        )
+
+        del (
+            representation_model,
+            representative_model,
+            representation_prediction,
+            representative_prediction,
+            representation_X,
+            drepresentation,
+            pca,
+        )
 
     lgb_prediction = np.asarray(
         lgb_model.predict(

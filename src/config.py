@@ -139,6 +139,61 @@ class ModelConfig:
         2028,
     )
 
+    # --------------------------------------------------------
+    # EXAONE-inspired XGBoost multi-view expert ensemble.
+    #
+    # All representations are fitted on official training
+    # rows only.
+    # --------------------------------------------------------
+
+    xgb_multiview_enabled: bool = True
+
+    # 92 raw + 8 PCA = exactly 100 representation features.
+    xgb_multiview_top_raw_features: int = 92
+
+    xgb_multiview_pca_components: int = 8
+
+    xgb_multiview_representation_seed: int = 3026
+
+    xgb_multiview_representative_seed: int = 4026
+
+    xgb_multiview_group_columns: Tuple[
+        str,
+        ...
+    ] = (
+        "pitcher_count_combo",
+        "pitcher_base_combo",
+    )
+
+    xgb_multiview_leverage_column: str = (
+        "li_log"
+    )
+
+    xgb_multiview_leverage_bins: int = 5
+
+    xgb_multiview_repr_weight_clip_low: float = (
+        0.50
+    )
+
+    xgb_multiview_repr_weight_clip_high: float = (
+        2.00
+    )
+
+    xgb_multiview_grid_step: float = 0.05
+
+    xgb_multiview_minimum_base_weight: float = (
+        0.45
+    )
+
+    xgb_multiview_maximum_aux_weight: float = (
+        0.40
+    )
+
+    # Permit at most 1e-5 Brier loss on either protected
+    # future fold while searching for larger complementary gain.
+    xgb_multiview_protected_tolerance: float = (
+        1.0e-5
+    )
     # ------------------------------------------------------------
     # XGBoost
     # ------------------------------------------------------------
@@ -391,8 +446,8 @@ class ExperimentConfig:
     # Frozen before V11 evaluation.
     # Public leaderboard statistics are not used
     # for model fitting, calibration, or gating.
-    submission_gate_previous_forward_brier: float = (
-        0.24805544458470605
+    submission_gate_previous_forward_brier = (
+        0.24803627124515615
     )
 
     # --------------------------------------------------------
@@ -407,12 +462,12 @@ class ExperimentConfig:
     # validation regimes.
     # --------------------------------------------------------
 
-    submission_gate_previous_2024_raw_brier: float = (
-        0.2480396804583947
+    submission_gate_previous_2024_raw_brier = (
+        0.24802482024929126
     )
 
-    submission_gate_previous_late_calibrated_brier: float = (
-        0.24786380942232472
+    submission_gate_previous_late_calibrated_brier = (
+        0.24784041429332387
     )
 
     submission_gate_previous_2024_min_gain: float = 0.0

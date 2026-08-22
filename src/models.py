@@ -22,6 +22,12 @@ except ImportError:
     CatBoostClassifier = None
 
 from src.config import ModelConfig
+from src.xgb_multiview import (
+    apply_numeric_pca_state,
+    build_representation_view,
+    fit_numeric_pca_state,
+    make_representative_sample_weight,
+)
 
 
 GBDT_MODEL_ORDER = ("xgb", "lgb", "cat")
@@ -148,6 +154,68 @@ def _quantile_dmatrix(
         max_bin=int(config.xgb_max_bin),
         nthread=int(config.num_threads),
     )
+
+
+def select_xgb_gain_features(
+    model,
+    feature_names: Sequence[str],
+    *,
+    top_k: int,
+) -> list[str]:
+    names = [
+        str(name)
+        for name in feature_names
+    ]
+
+    top_k = int(
+        top_k
+    )
+
+    if (
+        top_k <= 0
+        or top_k > len(names)
+    ):
+        raise ValueError(
+            "Invalid XGBoost Top-K "
+            f"feature count: {top_k}"
+        )
+
+    gain = model.get_score(
+        importance_type="gain"
+    )
+
+    original_index = {
+        name: index
+        for index, name
+        in enumerate(names)
+    }
+
+    ranked = sorted(
+        names,
+        key=lambda name: (
+            -float(
+                gain.get(
+                    name,
+                    0.0,
+                )
+            ),
+            original_index[name],
+        ),
+    )
+
+    selected = ranked[
+        :top_k
+    ]
+
+    if len(set(selected)) != len(
+        selected
+    ):
+        raise RuntimeError(
+            "Duplicate selected "
+            "XGBoost features."
+        )
+
+    return selected
 
 
 def validate_xgboost_backend(config: ModelConfig) -> None:
@@ -454,6 +522,216 @@ def train_xgboost_bagged_fold(
     )
 
 
+def train_xgboost_multiview_fold(
+    *,
+    base_model,
+    X_train: pd.DataFrame,
+    y_train: np.ndarray,
+    X_valid: pd.DataFrame,
+    sample_weight: np.ndarray,
+    numerical_cols: Sequence[str],
+    config: ModelConfig,
+    num_boost_round: int,
+):
+    if not config.xgb_multiview_enabled:
+        raise ValueError(
+            "XGBoost multi-view is disabled."
+        )
+
+    top_raw = (
+        select_xgb_gain_features(
+            base_model,
+            X_train.columns,
+            top_k=(
+                config
+                .xgb_multiview_top_raw_features
+            ),
+        )
+    )
+
+    pca_state = (
+        fit_numeric_pca_state(
+            X_train,
+            numerical_cols,
+            n_components=(
+                config
+                .xgb_multiview_pca_components
+            ),
+        )
+    )
+
+    representation_train = (
+        build_representation_view(
+            X_train,
+            top_raw,
+            pca_state,
+        )
+    )
+
+    representation_valid = (
+        build_representation_view(
+            X_valid,
+            top_raw,
+            pca_state,
+        )
+    )
+
+    if representation_train.shape[1] != (
+        config
+        .xgb_multiview_top_raw_features
+        + config
+        .xgb_multiview_pca_components
+    ):
+        raise RuntimeError(
+            "Unexpected representation "
+            "view width."
+        )
+
+    d_repr_train = (
+        _quantile_dmatrix(
+            representation_train,
+            config,
+            label=y_train,
+            weight=sample_weight,
+        )
+    )
+
+    d_repr_valid = (
+        _quantile_dmatrix(
+            representation_valid,
+            config,
+            ref=d_repr_train,
+        )
+    )
+
+    representation_model = (
+        xgb.train(
+            params=_xgb_params(
+                config,
+                seed=(
+                    config
+                    .xgb_multiview_representation_seed
+                ),
+            ),
+            dtrain=d_repr_train,
+            num_boost_round=int(
+                num_boost_round
+            ),
+            verbose_eval=False,
+        )
+    )
+
+    representation_prediction = (
+        np.asarray(
+            representation_model.predict(
+                d_repr_valid
+            ),
+            dtype=np.float64,
+        )
+    )
+
+    (
+        representative_weight,
+        representative_diagnostics,
+    ) = (
+        make_representative_sample_weight(
+            X_train,
+            sample_weight,
+            group_columns=(
+                config
+                .xgb_multiview_group_columns
+            ),
+            leverage_column=(
+                config
+                .xgb_multiview_leverage_column
+            ),
+            leverage_bins=(
+                config
+                .xgb_multiview_leverage_bins
+            ),
+            clip_low=(
+                config
+                .xgb_multiview_repr_weight_clip_low
+            ),
+            clip_high=(
+                config
+                .xgb_multiview_repr_weight_clip_high
+            ),
+        )
+    )
+
+    d_representative_train = (
+        _quantile_dmatrix(
+            X_train,
+            config,
+            label=y_train,
+            weight=(
+                representative_weight
+            ),
+        )
+    )
+
+    d_representative_valid = (
+        _quantile_dmatrix(
+            X_valid,
+            config,
+            ref=(
+                d_representative_train
+            ),
+        )
+    )
+
+    representative_model = (
+        xgb.train(
+            params=_xgb_params(
+                config,
+                seed=(
+                    config
+                    .xgb_multiview_representative_seed
+                ),
+            ),
+            dtrain=(
+                d_representative_train
+            ),
+            num_boost_round=int(
+                num_boost_round
+            ),
+            verbose_eval=False,
+        )
+    )
+
+    representative_prediction = (
+        np.asarray(
+            representative_model.predict(
+                d_representative_valid
+            ),
+            dtype=np.float64,
+        )
+    )
+
+    del (
+        d_repr_train,
+        d_repr_valid,
+        d_representative_train,
+        d_representative_valid,
+        representation_train,
+        representation_valid,
+        representative_weight,
+    )
+
+    gc.collect()
+
+    return (
+        representation_model,
+        representative_model,
+        representation_prediction,
+        representative_prediction,
+        top_raw,
+        pca_state,
+        representative_diagnostics,
+    )
+
+
 def train_xgboost_full_bagged(
     X_train: pd.DataFrame,
     y_train: np.ndarray,
@@ -503,7 +781,7 @@ def train_xgboost_full_bagged(
     gc.collect()
 
     return models
-    
+
 
 def train_xgboost_full(
     X_train: pd.DataFrame,
@@ -531,6 +809,141 @@ def train_xgboost_full(
 
     return model
 
+
+def train_xgboost_multiview_full(
+    *,
+    base_model,
+    X_train: pd.DataFrame,
+    y_train: np.ndarray,
+    sample_weight: np.ndarray,
+    numerical_cols: Sequence[str],
+    config: ModelConfig,
+    num_boost_round: int,
+):
+    top_raw = (
+        select_xgb_gain_features(
+            base_model,
+            X_train.columns,
+            top_k=(
+                config
+                .xgb_multiview_top_raw_features
+            ),
+        )
+    )
+
+    pca_state = (
+        fit_numeric_pca_state(
+            X_train,
+            numerical_cols,
+            n_components=(
+                config
+                .xgb_multiview_pca_components
+            ),
+        )
+    )
+
+    representation_train = (
+        build_representation_view(
+            X_train,
+            top_raw,
+            pca_state,
+        )
+    )
+
+    d_repr = _quantile_dmatrix(
+        representation_train,
+        config,
+        label=y_train,
+        weight=sample_weight,
+    )
+
+    representation_model = xgb.train(
+        params=_xgb_params(
+            config,
+            seed=(
+                config
+                .xgb_multiview_representation_seed
+            ),
+        ),
+        dtrain=d_repr,
+        num_boost_round=int(
+            num_boost_round
+        ),
+        verbose_eval=False,
+    )
+
+    (
+        representative_weight,
+        representative_diagnostics,
+    ) = (
+        make_representative_sample_weight(
+            X_train,
+            sample_weight,
+            group_columns=(
+                config
+                .xgb_multiview_group_columns
+            ),
+            leverage_column=(
+                config
+                .xgb_multiview_leverage_column
+            ),
+            leverage_bins=(
+                config
+                .xgb_multiview_leverage_bins
+            ),
+            clip_low=(
+                config
+                .xgb_multiview_repr_weight_clip_low
+            ),
+            clip_high=(
+                config
+                .xgb_multiview_repr_weight_clip_high
+            ),
+        )
+    )
+
+    d_representative = (
+        _quantile_dmatrix(
+            X_train,
+            config,
+            label=y_train,
+            weight=(
+                representative_weight
+            ),
+        )
+    )
+
+    representative_model = xgb.train(
+        params=_xgb_params(
+            config,
+            seed=(
+                config
+                .xgb_multiview_representative_seed
+            ),
+        ),
+        dtrain=d_representative,
+        num_boost_round=int(
+            num_boost_round
+        ),
+        verbose_eval=False,
+    )
+
+    del (
+        d_repr,
+        d_representative,
+        representation_train,
+        representative_weight,
+    )
+
+    gc.collect()
+
+    return (
+        representation_model,
+        representative_model,
+        top_raw,
+        pca_state,
+        representative_diagnostics,
+    )
 
 # ============================================================
 # LightGBM

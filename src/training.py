@@ -28,6 +28,12 @@ from src.models import (
     train_lightgbm_full,
     train_xgboost_bagged_fold,
     train_xgboost_full_bagged,
+    train_xgboost_multiview_fold,
+    train_xgboost_multiview_full,
+)
+from src.xgb_multiview import (
+    blend_xgb_views,
+    select_xgb_multiview_weights,
 )
 from src.preprocessing import TabularPreprocessor
 from src.runtime import apply_logit_intercept, blend_predictions
@@ -269,6 +275,72 @@ def run_temporal_validation(
             f"{xgb_bagging_gain:+.8f}"
         )
 
+        base_xgb_prediction = (
+            predictions[
+                "xgb"
+            ].copy()
+        )
+
+        (
+            representation_model,
+            representative_model,
+            representation_prediction,
+            representative_prediction,
+            representation_raw_features,
+            representation_pca_state,
+            representative_diagnostics,
+        ) = (
+            train_xgboost_multiview_fold(
+                base_model=(
+                    xgb_models[0]
+                ),
+                X_train=X_train,
+                y_train=y_train,
+                X_valid=X_valid,
+                sample_weight=(
+                    sample_weight
+                ),
+                numerical_cols=(
+                    preprocessor.num_cols_
+                ),
+                config=config.models,
+                num_boost_round=(
+                    best_iterations[
+                        "xgb"
+                    ]
+                ),
+            )
+        )
+
+        xgb_views = {
+            "base": (
+                base_xgb_prediction
+            ),
+            "representation": (
+                representation_prediction
+            ),
+            "representative": (
+                representative_prediction
+            ),
+        }
+
+        print(
+            "[XGB-MULTIVIEW] "
+            f"fold={fold.validation_label} "
+            f"repr_width="
+            f"{len(representation_raw_features) + config.models.xgb_multiview_pca_components} "
+            f"pca_explained="
+            f"{sum(representation_pca_state['explained_variance_ratio']):.4f} "
+            f"repr_weight_std="
+            f"{representative_diagnostics['factor_std']:.4f}"
+        )
+
+        del (
+            representation_model,
+            representative_model,
+            representation_prediction,
+            representative_prediction,
+        )
         del (
             xgb_models,
             xgb_single_prediction,
@@ -415,12 +487,110 @@ def run_temporal_validation(
                 "xgb_bagging_ablation": (
                     xgb_bagging_ablation
                 ),
+                "xgb_views": (
+                    xgb_views
+                ),
+
+                "xgb_multiview_fold_state": {
+                    "representation_raw_features": (
+                        representation_raw_features
+                    ),
+                    "pca_explained_variance_ratio": (
+                        representation_pca_state[
+                            "explained_variance_ratio"
+                        ]
+                    ),
+                    "representative_diagnostics": (
+                        representative_diagnostics
+                    ),
+                },
             }
         )
 
     if len(fold_results) != 3:
         raise RuntimeError(
             "This submission strategy requires 2023, 2024 and late-2024 holdouts."
+        )
+    
+    (
+        xgb_view_weights,
+        xgb_view_report,
+    ) = (
+        select_xgb_multiview_weights(
+            fold_results,
+            fold_importance=(
+                config
+                .temporal_fold_importance
+            ),
+            grid_step=(
+                config.models
+                .xgb_multiview_grid_step
+            ),
+            minimum_base_weight=(
+                config.models
+                .xgb_multiview_minimum_base_weight
+            ),
+            maximum_aux_weight=(
+                config.models
+                .xgb_multiview_maximum_aux_weight
+            ),
+            protected_labels=(
+                "2024",
+                "2024_late_abs",
+            ),
+            protected_tolerance=(
+                config.models
+                .xgb_multiview_protected_tolerance
+            ),
+        )
+    )
+
+    print(
+        "[XGB-MULTIVIEW-SELECT] "
+        f"weights={xgb_view_weights.tolist()} "
+        f"forward_brier="
+        f"{xgb_view_report['forward_weighted_brier']:.8f} "
+        f"gains="
+        f"{xgb_view_report['gain_vs_base']}"
+    )
+
+    for fold in fold_results:
+        upgraded = (
+            blend_xgb_views(
+                fold[
+                    "xgb_views"
+                ],
+                xgb_view_weights,
+            )
+        )
+
+        fold[
+            "predictions"
+        ][
+            "xgb"
+        ] = upgraded
+
+        fold[
+            "metrics"
+        ][
+            "xgb"
+        ] = (
+            evaluate_probabilities(
+                fold[
+                    "y_true"
+                ],
+                upgraded,
+            )
+        )
+
+        _print_metrics(
+            (
+                f"{fold['validation_label']}"
+                "/xgb_multiview"
+            ),
+            fold[
+                "metrics"
+            ]["xgb"],
         )
 
     (
@@ -576,10 +746,35 @@ def run_temporal_validation(
         )
 
     ensemble_state = {
-        "model_order": list(model_order),
-        "weights": weights.tolist(),
-        "calibration": calibrator,
-        "final_iterations": final_iterations,
+        "model_order": list(
+            model_order
+        ),
+
+        "weights": (
+            weights.tolist()
+        ),
+
+        "calibration": (
+            calibrator
+        ),
+
+        "final_iterations": (
+            final_iterations
+        ),
+
+        "xgb_multiview": {
+            "view_order": (
+                xgb_view_report[
+                    "view_order"
+                ]
+            ),
+            "weights": (
+                xgb_view_weights.tolist()
+            ),
+            "validation": (
+                xgb_view_report
+            ),
+        },
     }
     report = {
         "strategy": _strategy_name(model_order),
@@ -588,6 +783,9 @@ def run_temporal_validation(
         "calibration": calibrator,
         "calibration_transfer_metrics": transfer_metrics,
         "final_iterations": final_iterations,
+        "xgb_multiview": (
+            xgb_view_report
+        ),
     }
     by_label = {
         item["validation_label"]: item
@@ -708,6 +906,18 @@ def run_temporal_validation(
         ][
             "brier_gain"
         ]
+    )
+
+    xgb_mv_2024_gain = float(
+        xgb_view_report[
+            "gain_vs_base"
+        ]["2024"]
+    )
+
+    xgb_mv_late_gain = float(
+        xgb_view_report[
+            "gain_vs_base"
+        ]["2024_late_abs"]
     )
 
     forward_brier = float(
@@ -948,6 +1158,18 @@ def run_temporal_validation(
                 xgb_bagging_late_gain
             ),
 
+            "xgb_multiview_weights": (
+                xgb_view_weights.tolist()
+            ),
+
+            "xgb_multiview_2024_gain": (
+                xgb_mv_2024_gain
+            ),
+
+            "xgb_multiview_late_gain": (
+                xgb_mv_late_gain
+            ),
+
             "forward_weighted_brier": (
                 forward_brier
             ),
@@ -1151,6 +1373,56 @@ def train_and_save_final_models(
             path
         )
 
+    (
+        representation_model,
+        representative_model,
+        representation_raw_features,
+        representation_pca_state,
+        representative_diagnostics,
+    ) = (
+        train_xgboost_multiview_full(
+            base_model=xgb_models[0],
+            X_train=X,
+            y_train=y,
+            sample_weight=(
+                sample_weight
+            ),
+            numerical_cols=(
+                preprocessor.num_cols_
+            ),
+            config=config.models,
+            num_boost_round=(
+                xgb_rounds
+            ),
+        )
+    )
+
+    representation_path = (
+        model_dir
+        / "xgb_representation.json"
+    )
+
+    representative_path = (
+        model_dir
+        / "xgb_representative.json"
+    )
+
+    representation_model.save_model(
+        str(
+            representation_path
+        )
+    )
+
+    representative_model.save_model(
+        str(
+            representative_path
+        )
+    )
+
+    del (
+        representation_model,
+        representative_model,
+    )
     del xgb_models
     gc.collect()
 
@@ -1275,6 +1547,39 @@ def train_and_save_final_models(
                 in xgb_paths
             ],
         },        
+        "xgb_multiview": {
+            "view_order": [
+                "base",
+                "representation",
+                "representative",
+            ],
+
+            "weights": (
+                ensemble_state[
+                    "xgb_multiview"
+                ]["weights"]
+            ),
+
+            "representation_model_file": (
+                "xgb_representation.json"
+            ),
+
+            "representative_model_file": (
+                "xgb_representative.json"
+            ),
+
+            "representation_raw_features": (
+                representation_raw_features
+            ),
+
+            "pca_state": (
+                representation_pca_state
+            ),
+
+            "representative_diagnostics": (
+                representative_diagnostics
+            ),
+        },
     }
     bundle_path = model_dir / "bundle.pkl"
     joblib.dump(bundle, bundle_path, compress=3)
@@ -1306,6 +1611,8 @@ def train_and_save_final_models(
                 for name in neural_model_order
             ],
             bundle_path.name,
+            "xgb_representation.json",
+            "xgb_representative.json",
         ],
         "xgb_bagging": {
             "seeds": [

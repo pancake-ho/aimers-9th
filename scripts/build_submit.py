@@ -131,6 +131,45 @@ def _required_files() -> dict[str, Path]:
             {},
         )
     )
+    xgb_multiview = (
+        manifest.get(
+            "xgb_multiview"
+        )
+    )
+
+    if xgb_multiview:
+        for key in (
+            "representation_model_file",
+            "representative_model_file",
+        ):
+            filename = str(
+                xgb_multiview[
+                    key
+                ]
+            )
+
+            path_name = Path(
+                filename
+            )
+
+            if (
+                path_name.name
+                != filename
+                or path_name.suffix
+                != ".json"
+            ):
+                raise ValueError(
+                    "Invalid XGBoost "
+                    "multi-view artifact: "
+                    f"{filename}"
+                )
+
+            files[
+                f"model/{filename}"
+            ] = (
+                MODEL_DIR
+                / filename
+            )
 
     xgb_model_files = list(
         xgb_bagging.get(

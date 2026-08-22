@@ -195,7 +195,33 @@ class ConfigContractTests(
             ),
             1.0,
             places=12,
-        )   
+        )
+        self.assertTrue(
+            config.models
+            .xgb_multiview_enabled
+        )
+
+        self.assertEqual(
+            config.models
+            .xgb_multiview_top_raw_features,
+            92,
+        )
+
+        self.assertEqual(
+            config.models
+            .xgb_multiview_pca_components,
+            8,
+        )
+
+        self.assertEqual(
+            (
+                config.models
+                .xgb_multiview_top_raw_features
+                + config.models
+                .xgb_multiview_pca_components
+            ),
+            100,
+        )
 
     def test_neural_training_can_be_disabled_without_changing_model_defaults(
         self,
