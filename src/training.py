@@ -69,10 +69,10 @@ def _strategy_name(
 ) -> str:
     if model_order == GBDT_MODEL_ORDER:
         return (
-            "temporal_xgb_multiview_"
-            "bag3_repr100_reweight_"
+            "temporal_xgb_timeviews_"
+            "bag3_recent1_recent2_"
             "lgb_cat_fixedchamp_"
-            "calibrated_v12"
+            "calibrated_v13"
         )
 
     if model_order == (
@@ -80,10 +80,10 @@ def _strategy_name(
         "resnet",
     ):
         return (
-            "temporal_xgb_multiview_"
-            "bag3_repr100_reweight_"
+            "temporal_xgb_timeviews_"
+            "bag3_recent1_recent2_"
             "lgb_cat_resnet_"
-            "fixedchamp_calibrated_v12"
+            "fixedchamp_calibrated_v13"
         )
 
     if model_order == (
@@ -113,6 +113,79 @@ def _print_metrics(label: str, metrics: Mapping[str, float]) -> None:
         f"bias={metrics['calibration_bias']:+.6f}"
     )
 
+
+def _apply_temporal_xgb_blend(
+    fold: Dict[str, object],
+    temporal_weights: np.ndarray,
+) -> Dict[str, float]:
+    """Install the selected temporal-XGB prediction into one fold.
+
+    The fold-local prediction is computed only from that fold's
+    validation predictions.  No prediction array may be reused
+    across folds.
+    """
+
+    y_true = np.asarray(
+        fold["y_true"],
+        dtype=np.float64,
+    )
+
+    temporal_prediction = (
+        blend_temporal_views(
+            fold[
+                "xgb_temporal_views"
+            ],
+            temporal_weights,
+        )
+    )
+
+    temporal_prediction = np.asarray(
+        temporal_prediction,
+        dtype=np.float64,
+    )
+
+    if (
+        temporal_prediction.shape
+        != y_true.shape
+    ):
+        raise ValueError(
+            "Temporal-XGB prediction/target "
+            "shape mismatch: "
+            f"fold={fold.get('validation_label')} "
+            f"prediction={temporal_prediction.shape} "
+            f"target={y_true.shape}"
+        )
+
+    if not np.isfinite(
+        temporal_prediction
+    ).all():
+        raise ValueError(
+            "Temporal-XGB prediction contains "
+            "NaN or infinity: "
+            f"fold={fold.get('validation_label')}"
+        )
+
+    metrics = (
+        evaluate_probabilities(
+            y_true,
+            temporal_prediction,
+        )
+    )
+
+    fold[
+        "predictions"
+    ][
+        "xgb"
+    ] = temporal_prediction
+
+    fold[
+        "metrics"
+    ][
+        "xgb"
+    ] = metrics
+
+    return metrics
+    
 
 def build_feature_table(
     train: pd.DataFrame,
@@ -899,31 +972,10 @@ def run_temporal_validation(
     )
 
     for fold in fold_results:
-        temporal_prediction = (
-            blend_temporal_views(
-                fold[
-                    "xgb_temporal_views"
-                ],
+        temporal_metrics = (
+            _apply_temporal_xgb_blend(
+                fold,
                 temporal_weights,
-            )
-        )
-
-        fold[
-            "predictions"
-        ][
-            "xgb"
-        ] = temporal_prediction
-
-        fold[
-            "metrics"
-        ][
-            "xgb"
-        ] = (
-            evaluate_probabilities(
-                fold[
-                    "y_true"
-                ],
-                temporal_prediction,
             )
         )
 
@@ -932,34 +984,7 @@ def run_temporal_validation(
                 f"{fold['validation_label']}"
                 "/xgb_temporal_blend"
             ),
-            fold[
-                "metrics"
-            ][
-                "xgb"
-            ],
-        )
-
-        fold[
-            "metrics"
-        ][
-            "xgb"
-        ] = (
-            evaluate_probabilities(
-                fold[
-                    "y_true"
-                ],
-                upgraded,
-            )
-        )
-
-        _print_metrics(
-            (
-                f"{fold['validation_label']}"
-                "/xgb_multiview"
-            ),
-            fold[
-                "metrics"
-            ]["xgb"],
+            temporal_metrics,
         )
 
     (
@@ -1024,7 +1049,12 @@ def run_temporal_validation(
                     fold[
                         "xgb_multiview_fold_state"
                     ]
-                ),                             
+                ),       
+                "xgb_temporal_fold_state": (
+                    fold[
+                        "xgb_temporal_fold_state"
+                    ]
+                ),                                      
             }
         )
 
@@ -1348,6 +1378,22 @@ def run_temporal_validation(
         ]["2024_late_abs"]
     )
 
+    xgb_temporal_2024_gain = float(
+        temporal_report[
+            "gain_vs_base"
+        ][
+            "2024"
+        ]
+    )
+
+    xgb_temporal_late_gain = float(
+        temporal_report[
+            "gain_vs_base"
+        ][
+            "2024_late_abs"
+        ]
+    )    
+
     forward_brier = float(
         weight_report[
             "forward_weighted_brier"
@@ -1462,6 +1508,22 @@ def run_temporal_validation(
             >= 0.0
         ),
 
+        "xgb_temporal_2024_protected": (
+            xgb_temporal_2024_gain
+            + config.models
+            .xgb_temporal_protected_tolerance
+            + 1.0e-15
+            >= 0.0
+        ),
+
+        "xgb_temporal_late_protected": (
+            xgb_temporal_late_gain
+            + config.models
+            .xgb_temporal_protected_tolerance
+            + 1.0e-15
+            >= 0.0
+        ),
+
         # Compare the actually deployed predictor against the
         # frozen 907 validation champion.
         "beats_previous_forward_objective": (
@@ -1506,6 +1568,24 @@ def run_temporal_validation(
         "xgb_multiview_late_gain_vs_bag3": float(
             xgb_mv_late_gain
         ),
+
+        "xgb_temporal_weights": (
+            temporal_weights.tolist()
+        ),
+
+        "xgb_temporal_2024_gain_vs_base": float(
+            xgb_temporal_2024_gain
+        ),
+
+        "xgb_temporal_late_gain_vs_base": float(
+            xgb_temporal_late_gain
+        ),
+
+        "xgb_temporal_forward_brier": float(
+            temporal_report[
+                "forward_weighted_brier"
+            ]
+        ),        
     }
 
     # --------------------------------------------------------
@@ -1625,6 +1705,18 @@ def run_temporal_validation(
 
             "xgb_multiview_late_gain": (
                 xgb_mv_late_gain
+            ),
+
+            "xgb_temporal_weights": (
+                temporal_weights.tolist()
+            ),
+
+            "xgb_temporal_2024_gain": (
+                xgb_temporal_2024_gain
+            ),
+
+            "xgb_temporal_late_gain": (
+                xgb_temporal_late_gain
             ),
 
             "forward_weighted_brier": (

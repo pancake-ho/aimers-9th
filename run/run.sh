@@ -614,6 +614,7 @@ echo "[PREFLIGHT] Exercising source contracts"
         tests.test_artifact_policy \
         tests.test_xgb_multiview \
         tests.test_xgb_temporal \
+        tests.test_dual_xgb_training_contract \
         -q
 )
 

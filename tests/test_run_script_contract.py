@@ -289,17 +289,41 @@ class RunScriptContractTests(
             script,
         )
 
-    def test_production_mode_declares_xgb_multiview_v12(
+    def test_production_mode_declares_xgb_temporal_v13(
         self,
     ) -> None:
         script = self._script()
 
         self.assertIn(
-            "#SBATCH -J ensemble-v12mv",
+            "#SBATCH -J ensemble-v13tv",
             script,
         )
 
         self.assertIn(
+            (
+                "[MODE] "
+                "xgb-temporalviews-bag3+"
+                "lgb+cat+resnet+ftt "
+                "fixedchamp-calibrated-v13"
+            ),
+            script,
+        )
+
+        # V13 preflight must exercise the new
+        # temporal-XGB source contract.
+        self.assertIn(
+            "tests.test_xgb_temporal",
+            script,
+        )
+
+        # Regression guards: production must not
+        # silently fall back to older strategy names.
+        self.assertNotIn(
+            "#SBATCH -J ensemble-v12mv",
+            script,
+        )
+
+        self.assertNotIn(
             (
                 "[MODE] "
                 "xgb-multiview-bag3+"
