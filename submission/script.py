@@ -269,6 +269,86 @@ def _load_gbdt_models(
         cat_model,
     )
 
+def _predict_xgb_bag(
+    models,
+    dmatrix,
+) -> np.ndarray:
+    if not models:
+        raise ValueError(
+            "XGBoost bag must contain "
+            "at least one model."
+        )
+
+    predictions = []
+
+    expected_shape = None
+
+    for index, model in enumerate(
+        models
+    ):
+        prediction = np.asarray(
+            model.predict(
+                dmatrix
+            ),
+            dtype=np.float64,
+        )
+
+        if prediction.ndim != 1:
+            raise ValueError(
+                "XGBoost bag prediction "
+                "must be one-dimensional: "
+                f"index={index} "
+                f"shape={prediction.shape}"
+            )
+
+        if expected_shape is None:
+            expected_shape = (
+                prediction.shape
+            )
+        elif (
+            prediction.shape
+            != expected_shape
+        ):
+            raise ValueError(
+                "XGBoost bag prediction "
+                "shape mismatch: "
+                f"index={index} "
+                f"expected={expected_shape} "
+                f"actual={prediction.shape}"
+            )
+
+        if not np.isfinite(
+            prediction
+        ).all():
+            raise ValueError(
+                "XGBoost bag prediction "
+                "contains NaN or infinity: "
+                f"index={index}"
+            )
+
+        predictions.append(
+            prediction
+        )
+
+    stacked = np.vstack(
+        predictions
+    )
+
+    output = stacked.mean(
+        axis=0,
+        dtype=np.float64,
+    )
+
+    if not np.isfinite(
+        output
+    ).all():
+        raise ValueError(
+            "Averaged XGBoost prediction "
+            "contains NaN or infinity."
+        )
+
+    return output
+
 
 def main() -> None:
     started = time.perf_counter()
@@ -397,24 +477,10 @@ def main() -> None:
         feature_names=list(X.columns),
     )
 
-    xgb_seed_predictions = [
-        np.asarray(
-            model.predict(
-                dtest
-            ),
-            dtype=np.float64,
-        )
-        for model
-        in xgb_models
-    ]
-
     xgb_prediction = (
-        np.mean(
-            np.vstack(
-                xgb_seed_predictions
-            ),
-            axis=0,
-            dtype=np.float64,
+        _predict_xgb_bag(
+            xgb_models,
+            dtest,
         )
     )
 
@@ -443,7 +509,6 @@ def main() -> None:
     del (
         dtest,
         xgb_models,
-        xgb_seed_predictions,
         lgb_model,
         cat_model,
     )

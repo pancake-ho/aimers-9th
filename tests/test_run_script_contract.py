@@ -257,56 +257,67 @@ class RunScriptContractTests(
     ) -> None:
         script = self._script()
 
-        # ----------------------------------------------------
-        # Production ensemble contract.
-        #
-        # Do not tie this test to an obsolete version label
-        # such as temporal_v9.  The purpose of this test is
-        # to guarantee that the production job still requests
-        # the complete five-model ensemble and never silently
-        # falls back to a weaker CPU / non-neural path.
-        # ----------------------------------------------------
-
-        self.assertIn(
-            "xgb+lgb+cat+resnet+ft_transformer",
-            script,
-        )
-
-        self.assertIn(
-            "calibrated-shrink-v10",
-            script,
-        )
-
-        # The currently known-bad node remains excluded.
+        # This test protects execution semantics only.
+        # Strategy/version naming is checked separately.
         self.assertIn(
             "--exclude=moana-y5",
             script,
         )
 
-        # Validation diagnostics must survive a deliberate
-        # quality-gate failure.
+        # Validation diagnostics must survive
+        # a deliberate quality-gate failure.
         self.assertIn(
             "preserve_diagnostics",
             script,
         )
 
-        # Neural models are explicitly trained on CUDA.
+        # Neural models must explicitly use CUDA.
         self.assertIn(
             '"--nn-device" "cuda"',
             script,
         )
 
-        # A broken/missing GPU must terminate the experiment
-        # instead of silently switching to a weaker model.
+        # A missing/broken CUDA backend must terminate
+        # instead of silently running a weaker model.
         self.assertIn(
             "No valid CUDA backend",
             script,
         )
 
-        # The production Slurm path must never activate the
-        # non-neural fallback.
         self.assertNotIn(
             '"--disable-neural"',
+            script,
+        )
+
+    def test_production_mode_declares_xgb_bag3_v11(
+        self,
+    ) -> None:
+        script = self._script()
+
+        self.assertIn(
+            "#SBATCH -J ensemble-v11",
+            script,
+        )
+
+        self.assertIn(
+            (
+                "[MODE] "
+                "xgb-bag3+lgb+cat+resnet+"
+                "ft_transformer "
+                "calibrated-shrink-v11"
+            ),
+            script,
+        )
+
+        # Regression guards against accidentally
+        # launching an older production strategy.
+        self.assertNotIn(
+            "calibrated-shrink-v10",
+            script,
+        )
+
+        self.assertNotIn(
+            "temporal_v9",
             script,
         )
 

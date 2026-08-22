@@ -386,14 +386,39 @@ class ExperimentConfig:
 
     submission_gate_xgb_bagging_late_min_gain: float = 0.0
 
-    # V10 / score=902.415 validation anchor.
+    # V10 champion forward-validation anchor.
     #
-    # This is NOT a leaderboard-tuned probability parameter.
-    # It is the previous model's pre-existing validation
-    # objective and is used only to refuse packaging a V11
-    # candidate that does not improve our current champion.
+    # Frozen before V11 evaluation.
+    # Public leaderboard statistics are not used
+    # for model fitting, calibration, or gating.
     submission_gate_previous_forward_brier: float = (
         0.24805544458470605
+    )
+
+    # --------------------------------------------------------
+    # Previous-champion temporal anchors.
+    #
+    # These are the frozen validation results of V10,
+    # determined before V11 is evaluated.
+    #
+    # Public-LB predictions/statistics are NOT used here.
+    # V11 is not allowed to buy aggregate improvement by
+    # regressing either of the two most relevant future
+    # validation regimes.
+    # --------------------------------------------------------
+
+    submission_gate_previous_2024_raw_brier: float = (
+        0.2480396804583947
+    )
+
+    submission_gate_previous_late_calibrated_brier: float = (
+        0.24786380942232472
+    )
+
+    submission_gate_previous_2024_min_gain: float = 0.0
+
+    submission_gate_previous_late_calibrated_min_gain: float = (
+        0.0
     )
 
     submission_gate_min_forward_improvement: float = (
@@ -410,3 +435,30 @@ class ExperimentConfig:
     submission_gate_entity_2024_min_gain: float = 3.0e-5
 
     submission_gate_entity_late_min_gain: float = 3.0e-5
+
+    # --------------------------------------------------------
+    # V11b frozen champion ensemble.
+    #
+    # These outer weights are frozen from the previously
+    # validated V10 champion before XGBoost seed bagging was
+    # evaluated.
+    #
+    # V11b changes only the internal XGBoost estimator:
+    #
+    #   single-seed XGB -> 3-seed averaged XGB
+    #
+    # The outer ensemble allocation is deliberately not
+    # re-optimized, preventing the bagging experiment from
+    # being confounded by a second weight-search change.
+    # --------------------------------------------------------
+
+    ensemble_fixed_champion_weights: Tuple[
+        float,
+        ...
+    ] = (
+        0.700,
+        0.000,
+        0.150,
+        0.125,
+        0.025,
+    )

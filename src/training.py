@@ -11,7 +11,7 @@ import numpy as np
 import pandas as pd
 
 from src.calibration import (
-    select_calibration_aware_shrunk_weights,
+    evaluate_fixed_calibrated_weights,
 )
 from src.config import ExperimentConfig
 from src.features import (
@@ -57,7 +57,7 @@ def _strategy_name(
     if model_order == GBDT_MODEL_ORDER:
         return (
             "temporal_xgbbag3_lgb_cat_"
-            "calibrated_shrink_v11"
+            "fixedchamp_calibrated_v11b"
         )
 
     if model_order == (
@@ -66,7 +66,8 @@ def _strategy_name(
     ):
         return (
             "temporal_xgbbag3_lgb_cat_"
-            "resnet_calibrated_shrink_v11"
+            "resnet_fixedchamp_"
+            "calibrated_v11b"
         )
 
     if model_order == (
@@ -76,8 +77,8 @@ def _strategy_name(
     ):
         return (
             "temporal_xgbbag3_lgb_cat_"
-            "resnet_ftt_"
-            "calibrated_shrink_v11"
+            "resnet_ftt_fixedchamp_"
+            "calibrated_v11b"
         )
 
     raise ValueError(
@@ -427,43 +428,30 @@ def run_temporal_validation(
         weight_report,
         calibrator,
     ) = (
-        select_calibration_aware_shrunk_weights(
+        evaluate_fixed_calibrated_weights(
             fold_results,
-            fold_importance=(
-                config.temporal_fold_importance
+            weights=(
+                config
+                .ensemble_fixed_champion_weights
             ),
-            step=(
-                config.ensemble_grid_step
+            fold_importance=(
+                config
+                .temporal_fold_importance
             ),
             model_order=model_order,
-            protected_fold_labels=(
-                config.ensemble_protected_folds
-            ),
-            non_degradation_tolerance=(
-                config
-                .ensemble_non_degradation_tolerance
-            ),
-            reference_model=(
-                config
-                .ensemble_shrinkage_reference_model
-            ),
-            alpha_grid=(
-                config
-                .ensemble_shrinkage_alphas
-            ),
             early_month_max=(
                 config
                 .abs_late_train_month_max
             ),
-            maximum_2023_brier=(
-                config
-                .submission_gate_2023_max_brier
-            ),
-            minimum_calibration_transfer_gain=(
-                config
-                .submission_gate_calibration_min_transfer_gain
-            ),
         )
+    )
+
+    print(
+        "[ENSEMBLE-POLICY] "
+        "policy=fixed_v10_champion "
+        f"weights={weights.tolist()} "
+        f"forward_brier="
+        f"{weight_report['forward_weighted_brier']:.8f}"
     )
 
     print(
@@ -616,7 +604,12 @@ def run_temporal_validation(
 
 
     # --------------------------------------------------------
-    # V10 deployment-aware submission gate
+    # V11 deployment-aware submission gate
+    #
+    # Protect:
+    # 1) the current bagged XGB reference,
+    # 2) the previous V10 champion,
+    # 3) forward ABS calibration transfer.
     # --------------------------------------------------------
 
     guard_2023 = float(
@@ -741,8 +734,28 @@ def run_temporal_validation(
         - forward_brier
     )
 
+    previous_2024_raw_brier = float(
+        config
+        .submission_gate_previous_2024_raw_brier
+    )
+
+    previous_late_calibrated_brier = float(
+        config
+        .submission_gate_previous_late_calibrated_brier
+    )
+
+    champion_2024_gain = float(
+        previous_2024_raw_brier
+        - anchor_2024
+    )
+
+    champion_late_calibrated_gain = float(
+        previous_late_calibrated_brier
+        - late_transferred_brier
+    )
+
     checks = {
-        "shrinkage_selection": bool(
+        "fixed_weight_policy": bool(
             weight_report[
                 "selection_passed"
             ]
@@ -822,7 +835,20 @@ def run_temporal_validation(
             + 1.0e-15
             >= config
             .submission_gate_min_forward_improvement
-        ),        
+        ),
+        "beats_previous_2024_raw": (
+            champion_2024_gain
+            + 1.0e-15
+            >= config
+            .submission_gate_previous_2024_min_gain
+        ),
+
+        "beats_previous_late_calibrated": (
+            champion_late_calibrated_gain
+            + 1.0e-15
+            >= config
+            .submission_gate_previous_late_calibrated_min_gain
+        ),              
     }
 
     report[
@@ -837,16 +863,16 @@ def run_temporal_validation(
         "checks": checks,
 
         "observed": {
-            "selected_alpha": float(
+            "weight_policy": (
                 weight_report[
-                    "selected_alpha"
+                    "method"
                 ]
             ),
 
             "weights": list(
                 weights
             ),
-
+            
             "reference_model": (
                 reference_model
             ),
@@ -924,7 +950,22 @@ def run_temporal_validation(
 
             "forward_improvement": (
                 forward_improvement
-            ),            
+            ),     
+            "previous_2024_raw_brier": (
+                previous_2024_raw_brier
+            ),
+
+            "champion_2024_gain": (
+                champion_2024_gain
+            ),
+
+            "previous_late_calibrated_brier": (
+                previous_late_calibrated_brier
+            ),
+
+            "champion_late_calibrated_gain": (
+                champion_late_calibrated_gain
+            ),                   
         },
 
         "thresholds": {
@@ -975,6 +1016,15 @@ def run_temporal_validation(
             "minimum_forward_improvement": (
                 config
                 .submission_gate_min_forward_improvement
+            ),            
+            "previous_2024_min_gain": (
+                config
+                .submission_gate_previous_2024_min_gain
+            ),
+
+            "previous_late_calibrated_min_gain": (
+                config
+                .submission_gate_previous_late_calibrated_min_gain
             ),            
         },
     }

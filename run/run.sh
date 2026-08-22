@@ -534,7 +534,7 @@ if [[ "${GPU_READY}" -ne 1 ]]; then
 fi
 
 echo "[GPU] Functional CUDA backend confirmed."
-echo "[MODE] xgb-bag3+lgb+cat+resnet+ft_transformer calibrated-shrink-v11"
+echo "[MODE] xgb-bag3+lgb+cat+resnet+ft_transformer fixedchamp-calibrated-v11b"
 
 
 # ============================================================
@@ -609,6 +609,8 @@ echo "[PREFLIGHT] Exercising source contracts"
         tests.test_neural_contract \
         tests.test_calibration_shrinkage \
         tests.test_xgb_bagging_contract \
+        tests.test_xgb_bagging_submission_contract \
+        tests.test_fixed_champion_ensemble \
         -q
 )
 

@@ -920,3 +920,247 @@ def select_calibration_aware_shrunk_weights(
         report,
         selected_calibrator,
     )
+
+
+def evaluate_fixed_calibrated_weights(
+    folds: Sequence[
+        Mapping[str, object]
+    ],
+    *,
+    weights: Sequence[float],
+    fold_importance: Sequence[float],
+    model_order: Sequence[str],
+    early_month_max: int,
+) -> tuple[
+    np.ndarray,
+    Dict[str, object],
+    Dict[str, object],
+]:
+    """Evaluate a frozen outer ensemble with ABS calibration.
+
+    The weight vector is supplied externally and is not
+    optimized on the current folds.
+
+    This is used for the V11b ablation:
+        V10 outer weights
+        + XGBoost 3-seed bagging.
+
+    No test-row information is used.
+    """
+
+    if len(folds) != 3:
+        raise ValueError(
+            "Fixed calibrated ensemble requires "
+            "exactly three temporal folds."
+        )
+
+    labels = [
+        str(
+            fold.get(
+                "validation_label",
+                fold.get(
+                    "valid_season",
+                    "",
+                ),
+            )
+        )
+        for fold in folds
+    ]
+
+    required_labels = {
+        "2023",
+        "2024",
+        "2024_late_abs",
+    }
+
+    if set(labels) != required_labels:
+        raise ValueError(
+            "Unexpected temporal folds: "
+            f"{labels}"
+        )
+
+    weight_array = np.asarray(
+        weights,
+        dtype=np.float64,
+    )
+
+    if weight_array.shape != (
+        len(model_order),
+    ):
+        raise ValueError(
+            "Fixed ensemble weight count "
+            "does not match model_order."
+        )
+
+    if not np.isfinite(
+        weight_array
+    ).all():
+        raise ValueError(
+            "Fixed ensemble weights must "
+            "be finite."
+        )
+
+    if (
+        weight_array < 0.0
+    ).any():
+        raise ValueError(
+            "Fixed ensemble weights must "
+            "be non-negative."
+        )
+
+    if not np.isclose(
+        weight_array.sum(),
+        1.0,
+        atol=1.0e-12,
+    ):
+        raise ValueError(
+            "Fixed ensemble weights must "
+            "sum to one."
+        )
+
+    importance = np.asarray(
+        fold_importance,
+        dtype=np.float64,
+    )
+
+    if importance.shape != (
+        len(folds),
+    ):
+        raise ValueError(
+            "fold_importance must "
+            "match folds."
+        )
+
+    if (
+        not np.isfinite(
+            importance
+        ).all()
+        or (
+            importance < 0.0
+        ).any()
+        or importance.sum() <= 0.0
+    ):
+        raise ValueError(
+            "Invalid fold importance."
+        )
+
+    importance = (
+        importance
+        / importance.sum()
+    )
+
+    by_label = {
+        label: folds[index]
+        for index, label
+        in enumerate(labels)
+    }
+
+    fold_brier = {
+        label: _fold_brier_with_weights(
+            fold,
+            weight_array,
+            model_order,
+        )
+        for label, fold
+        in by_label.items()
+    }
+
+    calibrator = (
+        fit_abs_regime_logit_calibrator(
+            full_2024_fold=(
+                by_label["2024"]
+            ),
+            late_2024_fold=(
+                by_label[
+                    "2024_late_abs"
+                ]
+            ),
+            weights=weight_array,
+            model_order=model_order,
+            early_month_max=(
+                early_month_max
+            ),
+        )
+    )
+
+    if calibrator["accepted"]:
+        deployed_late_brier = float(
+            calibrator[
+                "late_transferred_brier"
+            ]
+        )
+    else:
+        deployed_late_brier = float(
+            fold_brier[
+                "2024_late_abs"
+            ]
+        )
+
+    objective = float(
+        importance[
+            labels.index("2023")
+        ]
+        * fold_brier["2023"]
+        + importance[
+            labels.index("2024")
+        ]
+        * fold_brier["2024"]
+        + importance[
+            labels.index(
+                "2024_late_abs"
+            )
+        ]
+        * deployed_late_brier
+    )
+
+    report = {
+        "method": (
+            "fixed_v10_champion_weights"
+        ),
+
+        # Structural validity only.
+        # Actual Brier gates remain in training.py.
+        "selection_passed": True,
+
+        "model_order": list(
+            model_order
+        ),
+
+        "weights": (
+            weight_array.tolist()
+        ),
+
+        "fold_importance": (
+            importance.tolist()
+        ),
+
+        "fold_brier": {
+            key: float(value)
+            for key, value
+            in fold_brier.items()
+        },
+
+        "deployed_late_brier": float(
+            deployed_late_brier
+        ),
+
+        "forward_weighted_brier": float(
+            objective
+        ),
+
+        "calibration_accepted": bool(
+            calibrator["accepted"]
+        ),
+
+        "calibration_transfer_gain": float(
+            calibrator[
+                "transfer_gain"
+            ]
+        ),
+    }
+
+    return (
+        weight_array.copy(),
+        report,
+        calibrator,
+    )

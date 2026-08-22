@@ -152,6 +152,50 @@ class ConfigContractTests(
                 2028,
             ),
         )
+        self.assertEqual(
+            config
+            .submission_gate_previous_2024_raw_brier,
+            0.2480396804583947,
+        )
+
+        self.assertEqual(
+            config
+            .submission_gate_previous_late_calibrated_brier,
+            0.24786380942232472,
+        )
+
+        self.assertEqual(
+            config
+            .submission_gate_previous_forward_brier,
+            0.24805544458470605,
+        )
+
+        self.assertEqual(
+            config
+            .submission_gate_min_forward_improvement,
+            2.0e-6,
+        )     
+
+        self.assertEqual(
+            config
+            .ensemble_fixed_champion_weights,
+            (
+                0.700,
+                0.000,
+                0.150,
+                0.125,
+                0.025,
+            ),
+        )
+
+        self.assertAlmostEqual(
+            sum(
+                config
+                .ensemble_fixed_champion_weights
+            ),
+            1.0,
+            places=12,
+        )   
 
     def test_neural_training_can_be_disabled_without_changing_model_defaults(
         self,
