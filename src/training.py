@@ -114,6 +114,40 @@ def _print_metrics(label: str, metrics: Mapping[str, float]) -> None:
     )
 
 
+def _split_entity_feature_view(
+    X: pd.DataFrame,
+) -> tuple[pd.DataFrame, list[str]]:
+    entity_columns = [
+        column
+        for column
+        in X.columns
+        if str(column).startswith(
+            "tm_entity_"
+        )
+    ]
+
+    if not entity_columns:
+        raise ValueError(
+            "Trackman entity ablation requested "
+            "but no tm_entity_* columns exist."
+        )
+
+    baseline = X.drop(
+        columns=entity_columns
+    )
+
+    if baseline.shape[1] == 0:
+        raise ValueError(
+            "Trackman entity ablation "
+            "removed every feature."
+        )
+
+    return (
+        baseline,
+        entity_columns,
+    )
+
+
 def _apply_temporal_xgb_blend(
     fold: Dict[str, object],
     temporal_weights: np.ndarray,
@@ -358,6 +392,126 @@ def run_temporal_validation(
             f"gain="
             f"{xgb_bagging_gain:+.8f}"
         )
+
+        # ----------------------------------------------------
+        # Paired Trackman-entity ablation.
+        #
+        # Same fold, same XGBoost configuration, same bagging seeds.
+        # The only difference is removal of tm_entity_* columns.
+        #
+        # Run only on the two protected future regimes to avoid
+        # unnecessary extra training cost.
+        # ----------------------------------------------------
+        if (
+            entity_gate_required
+            and fold.validation_label
+            in {
+                "2024",
+                "2024_late_abs",
+            }
+        ):
+            (
+                X_train_no_entity,
+                entity_columns,
+            ) = _split_entity_feature_view(
+                X_train
+            )
+
+            X_valid_no_entity = (
+                X_valid.drop(
+                    columns=entity_columns
+                )
+            )
+
+            start = time.perf_counter()
+
+            (
+                no_entity_models,
+                no_entity_prediction,
+                _,
+                no_entity_single_prediction,
+            ) = train_xgboost_bagged_fold(
+                X_train_no_entity,
+                y_train,
+                X_valid_no_entity,
+                y_valid,
+                sample_weight,
+                config.models,
+            )
+
+            no_entity_seconds = (
+                time.perf_counter()
+                - start
+            )
+
+            no_entity_metrics = (
+                evaluate_probabilities(
+                    y_valid,
+                    no_entity_prediction,
+                )
+            )
+
+            no_entity_metrics[
+                "train_seconds"
+            ] = float(
+                no_entity_seconds
+            )
+
+            entity_brier_gain = float(
+                no_entity_metrics["brier"]
+                - per_model_metrics[
+                    "xgb"
+                ][
+                    "brier"
+                ]
+            )
+
+            entity_ablation = {
+                "entity_feature_count": int(
+                    len(
+                        entity_columns
+                    )
+                ),
+                "without_entity_feature_count": int(
+                    X_train_no_entity.shape[1]
+                ),
+                "with_entity_feature_count": int(
+                    X_train.shape[1]
+                ),
+                "without_entity_metrics": (
+                    no_entity_metrics
+                ),
+                "with_entity_metrics": dict(
+                    per_model_metrics[
+                        "xgb"
+                    ]
+                ),
+                "brier_gain": (
+                    entity_brier_gain
+                ),
+            }
+
+            print(
+                "[ENTITY-ABLATION] "
+                f"fold={fold.validation_label} "
+                f"entity_features="
+                f"{len(entity_columns)} "
+                f"without="
+                f"{no_entity_metrics['brier']:.8f} "
+                f"with="
+                f"{per_model_metrics['xgb']['brier']:.8f} "
+                f"gain="
+                f"{entity_brier_gain:+.8f}"
+            )
+
+            del (
+                no_entity_models,
+                no_entity_prediction,
+                no_entity_single_prediction,
+                X_train_no_entity,
+                X_valid_no_entity,
+            )
+            gc.collect()
 
         base_xgb_prediction = (
             predictions[

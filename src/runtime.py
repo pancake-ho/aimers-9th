@@ -8,7 +8,7 @@ import pandas as pd
 
 ID_COL = "row_id"
 TARGET_COL = "control_success"
-FEATURE_VERSION = 4
+FEATURE_VERSION = 5
 
 PITCHER_RATE_COLS = (
     "asof_pitcher_success_rate",
@@ -39,6 +39,23 @@ HAND_MAP = {
     "1": 1,
     "2": 2,
 }
+
+TRACKMAN_ENTITY_METRICS = (
+    "rel_speed",
+    "spin_rate",
+    "induced_vert_break",
+    "horz_break",
+    "extension",
+    "rel_height",
+    "rel_side",
+)
+
+TRACKMAN_ENTITY_PITCH_GROUPS = (
+    "fastball",
+    "breaking",
+    "offspeed",
+    "other",
+)
 
 
 def _numeric(series: pd.Series, fill_value: float = 0.0) -> pd.Series:
@@ -97,80 +114,797 @@ def _lookup_trackman_profile(
     return pd.DataFrame(arrays, index=index)
 
 
-def add_trackman_features(out: pd.DataFrame, trackman_state) -> pd.DataFrame:
+def add_trackman_features(
+    out: pd.DataFrame,
+    trackman_state,
+) -> pd.DataFrame:
     if not trackman_state:
         return out
 
-    season = _numeric(out["season"], -1).astype(int).to_numpy()
+    season = (
+        _numeric(
+            out["season"],
+            -1,
+        )
+        .astype(int)
+        .to_numpy()
+    )
+
     pitcher_hand = (
         out["pitcher_hand"]
         .map(HAND_MAP)
-        .fillna(_numeric(out["pitcher_hand"], -1))
+        .fillna(
+            _numeric(
+                out["pitcher_hand"],
+                -1,
+            )
+        )
         .astype(int)
         .to_numpy()
     )
+
     batter_hand = (
         out["batter_hand"]
         .map(HAND_MAP)
-        .fillna(_numeric(out["batter_hand"], -1))
+        .fillna(
+            _numeric(
+                out["batter_hand"],
+                -1,
+            )
+        )
         .astype(int)
         .to_numpy()
     )
 
-    profiles = trackman_state.get("profiles", {})
+    profiles = trackman_state.get(
+        "profiles",
+        {},
+    )
+
     profile_frames = []
-    global_profile = profiles.get("hand")
+
+    global_profile = profiles.get(
+        "hand"
+    )
+
     if global_profile:
-        keys = list(zip(season, pitcher_hand, batter_hand))
-        profile_frames.append(_lookup_trackman_profile(out.index, global_profile, keys))
-
-    count_profile = profiles.get("hand_count")
-    if count_profile:
-        balls = _numeric(out["balls_before"], -1).astype(int).to_numpy()
-        strikes = _numeric(out["strikes_before"], -1).astype(int).to_numpy()
-        keys = list(zip(season, pitcher_hand, batter_hand, balls, strikes))
-        profile_frames.append(_lookup_trackman_profile(out.index, count_profile, keys))
-
-    # High-confidence pitcher identity links are precomputed from training-side
-    # official files. Runtime performs only immutable row lookups; it neither
-    # reads Trackman nor pools information across evaluation rows.
-    entity = trackman_state.get("entity")
-    if entity:
-        entity_profiles = entity.get("profiles", {})
-        mapping_profile = entity_profiles.get("mapping")
-        if mapping_profile:
-            pitcher_id = _numeric(out["pitcher_id"], -1).astype(np.int64).to_numpy()
-            mapping_keys = list(zip(season, pitcher_id))
-            profile_frames.append(
-                _lookup_trackman_profile(out.index, mapping_profile, mapping_keys)
+        keys = list(
+            zip(
+                season,
+                pitcher_hand,
+                batter_hand,
             )
-            mapping_lookup = mapping_profile.get("lookup", {})
-            trackman_id = np.full(len(out), -1, dtype=np.int64)
-            for row_pos, key in enumerate(mapping_keys):
-                values = mapping_lookup.get(tuple(key))
+        )
+
+        profile_frames.append(
+            _lookup_trackman_profile(
+                out.index,
+                global_profile,
+                keys,
+            )
+        )
+
+    count_profile = profiles.get(
+        "hand_count"
+    )
+
+    if count_profile:
+        balls = (
+            _numeric(
+                out["balls_before"],
+                -1,
+            )
+            .astype(int)
+            .to_numpy()
+        )
+
+        strikes = (
+            _numeric(
+                out["strikes_before"],
+                -1,
+            )
+            .astype(int)
+            .to_numpy()
+        )
+
+        keys = list(
+            zip(
+                season,
+                pitcher_hand,
+                batter_hand,
+                balls,
+                strikes,
+            )
+        )
+
+        profile_frames.append(
+            _lookup_trackman_profile(
+                out.index,
+                count_profile,
+                keys,
+            )
+        )
+
+    # --------------------------------------------------------
+    # Precomputed official-data pitcher entity state.
+    # Runtime never resolves identities using evaluation rows.
+    # --------------------------------------------------------
+    entity_state = trackman_state.get(
+        "entity"
+    )
+
+    if entity_state:
+        entity_profiles = (
+            entity_state.get(
+                "profiles",
+                {},
+            )
+        )
+
+        mapping_profile = (
+            entity_profiles.get(
+                "mapping"
+            )
+        )
+
+        if mapping_profile:
+            pitcher_id = (
+                _numeric(
+                    out["pitcher_id"],
+                    -1,
+                )
+                .astype(np.int64)
+                .to_numpy()
+            )
+
+            mapping_keys = list(
+                zip(
+                    season,
+                    pitcher_id,
+                )
+            )
+
+            profile_frames.append(
+                _lookup_trackman_profile(
+                    out.index,
+                    mapping_profile,
+                    mapping_keys,
+                )
+            )
+
+            mapping_lookup = (
+                mapping_profile.get(
+                    "lookup",
+                    {},
+                )
+            )
+
+            trackman_id = np.full(
+                len(out),
+                -1,
+                dtype=np.int64,
+            )
+
+            for row_pos, key in enumerate(
+                mapping_keys
+            ):
+                values = (
+                    mapping_lookup.get(
+                        tuple(key)
+                    )
+                )
+
                 if values is not None:
-                    trackman_id[row_pos] = int(values.get("trackman_id", -1))
+                    trackman_id[
+                        row_pos
+                    ] = int(
+                        values.get(
+                            "trackman_id",
+                            -1,
+                        )
+                    )
 
             entity_key_specs = {
-                "pitcher": list(zip(season, trackman_id)),
-                "recent": list(zip(season, trackman_id)),
-                "arsenal": list(zip(season, trackman_id)),
+                "pitcher": list(
+                    zip(
+                        season,
+                        trackman_id,
+                    )
+                ),
+                "recent": list(
+                    zip(
+                        season,
+                        trackman_id,
+                    )
+                ),
+                "arsenal": list(
+                    zip(
+                        season,
+                        trackman_id,
+                    )
+                ),
             }
-            balls = _numeric(out["balls_before"], -1).astype(int).to_numpy()
-            strikes = _numeric(out["strikes_before"], -1).astype(int).to_numpy()
-            entity_key_specs["count"] = list(
-                zip(season, trackman_id, balls, strikes)
+
+            balls = (
+                _numeric(
+                    out["balls_before"],
+                    -1,
+                )
+                .astype(int)
+                .to_numpy()
             )
-            for name, keys in entity_key_specs.items():
-                profile = entity_profiles.get(name)
+
+            strikes = (
+                _numeric(
+                    out["strikes_before"],
+                    -1,
+                )
+                .astype(int)
+                .to_numpy()
+            )
+
+            entity_key_specs[
+                "count"
+            ] = list(
+                zip(
+                    season,
+                    trackman_id,
+                    balls,
+                    strikes,
+                )
+            )
+
+            for (
+                name,
+                keys,
+            ) in entity_key_specs.items():
+                profile = (
+                    entity_profiles.get(
+                        name
+                    )
+                )
+
                 if profile:
                     profile_frames.append(
-                        _lookup_trackman_profile(out.index, profile, keys)
+                        _lookup_trackman_profile(
+                            out.index,
+                            profile,
+                            keys,
+                        )
                     )
 
     if not profile_frames:
         return out
-    return pd.concat([out, *profile_frames], axis=1, copy=False)
+
+    result = pd.concat(
+        [
+            out,
+            *profile_frames,
+        ],
+        axis=1,
+        copy=False,
+    )
+
+    # Fail closed on the population/entity feature-name collision that existed
+    # in the dormant implementation.
+    if not result.columns.is_unique:
+        duplicate_columns = (
+            result.columns[
+                result.columns.duplicated()
+            ]
+            .unique()
+            .tolist()
+        )
+        raise RuntimeError(
+            "Duplicate Trackman feature columns: "
+            f"{duplicate_columns[:20]}"
+        )
+
+    if entity_state:
+        result = (
+            _add_trackman_entity_v2_features(
+                result,
+                entity_state,
+            )
+        )
+
+    return result
+
+
+def _add_trackman_entity_v2_features(
+    out: pd.DataFrame,
+    entity_state: Mapping[str, object],
+) -> pd.DataFrame:
+    v2 = entity_state.get(
+        "v2",
+        {},
+    )
+
+    if not bool(
+        v2.get(
+            "enabled",
+            False,
+        )
+    ):
+        return out
+
+    required = {
+        "tm_entity_map_confidence",
+        "tm_entity_available",
+        "tm_entity_log_n",
+        "tm_entity_freshness_gap",
+        "tm_hand_available",
+        "tm_entity_count_available",
+        "tm_entity_count_log_n",
+        "tm_count_available",
+    }
+
+    for metric in TRACKMAN_ENTITY_METRICS:
+        required.update(
+            {
+                f"tm_entity_{metric}_mean",
+                f"tm_hand_{metric}_mean",
+                (
+                    "tm_entity_count_"
+                    f"{metric}_mean"
+                ),
+                f"tm_count_{metric}_mean",
+            }
+        )
+
+    for group in TRACKMAN_ENTITY_PITCH_GROUPS:
+        required.update(
+            {
+                f"tm_entity_{group}_share",
+                f"tm_hand_{group}_share",
+                (
+                    "tm_entity_count_"
+                    f"{group}_share"
+                ),
+                f"tm_count_{group}_share",
+            }
+        )
+
+    missing = sorted(
+        required
+        - set(out.columns)
+    )
+
+    if missing:
+        raise ValueError(
+            "Trackman entity v2 requires "
+            "missing columns: "
+            f"{missing[:20]}"
+        )
+
+    pool_strength = float(
+        v2.get(
+            "pool_strength",
+            500.0,
+        )
+    )
+    count_pool_strength = float(
+        v2.get(
+            "count_pool_strength",
+            100.0,
+        )
+    )
+    freshness_decay = float(
+        v2.get(
+            "freshness_decay",
+            0.70,
+        )
+    )
+
+    if (
+        pool_strength <= 0.0
+        or count_pool_strength <= 0.0
+    ):
+        raise ValueError(
+            "Trackman entity pooling "
+            "strengths must be positive."
+        )
+
+    if (
+        freshness_decay < 0.0
+        or not np.isfinite(
+            freshness_decay
+        )
+    ):
+        raise ValueError(
+            "Trackman entity freshness decay "
+            "must be finite and non-negative."
+        )
+
+    confidence = (
+        _numeric(
+            out[
+                "tm_entity_map_confidence"
+            ],
+            0.0,
+        )
+        .clip(
+            0.0,
+            1.0,
+        )
+    )
+
+    freshness_gap = (
+        _numeric(
+            out[
+                "tm_entity_freshness_gap"
+            ],
+            0.0,
+        )
+        .clip(lower=0.0)
+    )
+
+    freshness_factor = (
+        np.exp(
+            -freshness_decay
+            * freshness_gap
+        )
+        .astype(np.float32)
+    )
+
+    entity_available = (
+        _numeric(
+            out[
+                "tm_entity_available"
+            ],
+            0.0,
+        )
+        > 0.0
+    ).astype(np.float32)
+
+    population_available = (
+        _numeric(
+            out[
+                "tm_hand_available"
+            ],
+            0.0,
+        )
+        > 0.0
+    ).astype(np.float32)
+
+    pair_available = (
+        entity_available
+        * population_available
+    ).astype(np.float32)
+
+    entity_log_n = (
+        _numeric(
+            out[
+                "tm_entity_log_n"
+            ],
+            0.0,
+        )
+        .clip(
+            lower=0.0,
+            upper=20.0,
+        )
+    )
+
+    entity_n = (
+        np.expm1(
+            entity_log_n
+        )
+        .clip(lower=0.0)
+    )
+
+    sample_factor = (
+        entity_n
+        / (
+            entity_n
+            + pool_strength
+        )
+    )
+
+    alpha = (
+        confidence
+        * sample_factor
+        * freshness_factor
+        * pair_available
+    ).clip(
+        0.0,
+        1.0,
+    ).astype(np.float32)
+
+    # Count-specific reliability.
+    count_entity_available = (
+        _numeric(
+            out[
+                "tm_entity_count_available"
+            ],
+            0.0,
+        )
+        > 0.0
+    ).astype(np.float32)
+
+    count_population_available = (
+        _numeric(
+            out[
+                "tm_count_available"
+            ],
+            0.0,
+        )
+        > 0.0
+    ).astype(np.float32)
+
+    count_pair_available = (
+        count_entity_available
+        * count_population_available
+    ).astype(np.float32)
+
+    count_log_n = (
+        _numeric(
+            out[
+                "tm_entity_count_log_n"
+            ],
+            0.0,
+        )
+        .clip(
+            lower=0.0,
+            upper=20.0,
+        )
+    )
+
+    count_n = (
+        np.expm1(
+            count_log_n
+        )
+        .clip(lower=0.0)
+    )
+
+    count_sample_factor = (
+        count_n
+        / (
+            count_n
+            + count_pool_strength
+        )
+    )
+
+    count_alpha = (
+        confidence
+        * count_sample_factor
+        * freshness_factor
+        * count_pair_available
+    ).clip(
+        0.0,
+        1.0,
+    ).astype(np.float32)
+
+    out[
+        "tm_entity_freshness_factor"
+    ] = freshness_factor
+
+    out[
+        "tm_entity_pool_alpha"
+    ] = alpha
+
+    out[
+        "tm_entity_count_pool_alpha"
+    ] = count_alpha
+
+    out[
+        "tm_entity_v2_available"
+    ] = (
+        pair_available
+        .astype(np.int8)
+    )
+
+    out[
+        "tm_entity_count_v2_available"
+    ] = (
+        count_pair_available
+        .astype(np.int8)
+    )
+
+    # --------------------------------------------------------
+    # Physical Trackman metrics.
+    # --------------------------------------------------------
+    for metric in TRACKMAN_ENTITY_METRICS:
+        entity_value = _numeric(
+            out[
+                f"tm_entity_{metric}_mean"
+            ],
+            0.0,
+        )
+
+        population_value = _numeric(
+            out[
+                f"tm_hand_{metric}_mean"
+            ],
+            0.0,
+        )
+
+        deviation = (
+            (
+                entity_value
+                - population_value
+            )
+            * pair_available
+        ).astype(np.float32)
+
+        out[
+            f"tm_entity_{metric}_pop_dev"
+        ] = deviation
+
+        pooled = (
+            population_value
+            + alpha
+            * deviation
+        )
+
+        out[
+            f"tm_entity_{metric}_pooled"
+        ] = (
+            pooled.where(
+                population_available
+                > 0.0,
+                0.0,
+            )
+            .astype(np.float32)
+        )
+
+        count_entity_value = _numeric(
+            out[
+                (
+                    "tm_entity_count_"
+                    f"{metric}_mean"
+                )
+            ],
+            0.0,
+        )
+
+        count_population_value = _numeric(
+            out[
+                f"tm_count_{metric}_mean"
+            ],
+            0.0,
+        )
+
+        count_deviation = (
+            (
+                count_entity_value
+                - count_population_value
+            )
+            * count_pair_available
+        ).astype(np.float32)
+
+        out[
+            (
+                "tm_entity_count_"
+                f"{metric}_pop_dev"
+            )
+        ] = count_deviation
+
+        count_pooled = (
+            count_population_value
+            + count_alpha
+            * count_deviation
+        )
+
+        out[
+            (
+                "tm_entity_count_"
+                f"{metric}_pooled"
+            )
+        ] = (
+            count_pooled.where(
+                count_population_available
+                > 0.0,
+                0.0,
+            )
+            .astype(np.float32)
+        )
+
+    # --------------------------------------------------------
+    # Pitch-group usage shares.
+    # --------------------------------------------------------
+    for group in TRACKMAN_ENTITY_PITCH_GROUPS:
+        entity_value = _numeric(
+            out[
+                f"tm_entity_{group}_share"
+            ],
+            0.0,
+        )
+
+        population_value = _numeric(
+            out[
+                f"tm_hand_{group}_share"
+            ],
+            0.0,
+        )
+
+        deviation = (
+            (
+                entity_value
+                - population_value
+            )
+            * pair_available
+        ).astype(np.float32)
+
+        out[
+            (
+                f"tm_entity_{group}_"
+                "share_pop_dev"
+            )
+        ] = deviation
+
+        pooled = (
+            population_value
+            + alpha
+            * deviation
+        )
+
+        out[
+            (
+                f"tm_entity_{group}_"
+                "share_pooled"
+            )
+        ] = (
+            pooled.where(
+                population_available
+                > 0.0,
+                0.0,
+            )
+            .astype(np.float32)
+        )
+
+        count_entity_value = _numeric(
+            out[
+                (
+                    "tm_entity_count_"
+                    f"{group}_share"
+                )
+            ],
+            0.0,
+        )
+
+        count_population_value = _numeric(
+            out[
+                f"tm_count_{group}_share"
+            ],
+            0.0,
+        )
+
+        count_deviation = (
+            (
+                count_entity_value
+                - count_population_value
+            )
+            * count_pair_available
+        ).astype(np.float32)
+
+        out[
+            (
+                "tm_entity_count_"
+                f"{group}_share_pop_dev"
+            )
+        ] = count_deviation
+
+        count_pooled = (
+            count_population_value
+            + count_alpha
+            * count_deviation
+        )
+
+        out[
+            (
+                "tm_entity_count_"
+                f"{group}_share_pooled"
+            )
+        ] = (
+            count_pooled.where(
+                count_population_available
+                > 0.0,
+                0.0,
+            )
+            .astype(np.float32)
+        )
+
+    return out
 
 
 def add_main_history_features(out: pd.DataFrame, history_state) -> pd.DataFrame:

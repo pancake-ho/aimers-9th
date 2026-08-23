@@ -93,121 +93,508 @@ def _update_entity_pitcher_profiles(
 ) -> None:
     if not trackman_ids:
         return
-    selected = past.loc[past["pitcher_trackman_id"].isin(trackman_ids)]
+
+    selected = past.loc[
+        past[
+            "pitcher_trackman_id"
+        ].isin(trackman_ids)
+    ].copy()
+
     if selected.empty:
         return
 
-    pitcher = selected.groupby("pitcher_trackman_id", observed=True, sort=False)
-    means = pitcher[list(TRACKMAN_METRICS)].mean()
-    stds = pitcher[list(ENTITY_STD_METRICS)].std()
-    shares = pitcher[list(PITCH_GROUPS)].mean()
-    counts = pitcher.size()
-    pitcher_lookup = profiles["pitcher"]["lookup"]
-    for trackman_id in means.index:
-        values: Dict[str, float] = {}
-        for metric in TRACKMAN_METRICS:
-            values[f"tm_entity_{metric}_mean"] = _finite_or_zero(
-                means.loc[trackman_id, metric]
-            )
-        for metric in ENTITY_STD_METRICS:
-            values[f"tm_entity_{metric}_std"] = _finite_or_zero(
-                stds.loc[trackman_id, metric]
-            )
-        for group in PITCH_GROUPS:
-            values[f"tm_entity_{group}_share"] = _finite_or_zero(
-                shares.loc[trackman_id, group]
-            )
-        values["tm_entity_log_n"] = float(np.log1p(counts.loc[trackman_id]))
-        values["tm_entity_available"] = 1.0
-        pitcher_lookup[(target_season, int(trackman_id))] = values
+    selected["season"] = (
+        pd.to_numeric(
+            selected["season"],
+            errors="raise",
+        )
+        .astype(np.int16)
+    )
 
-    count_group = selected.groupby(
-        ["pitcher_trackman_id", "balls_before", "strikes_before"],
+    pitcher = selected.groupby(
+        "pitcher_trackman_id",
         observed=True,
         sort=False,
     )
-    count_means = count_group[list(TRACKMAN_METRICS)].mean()
-    count_shares = count_group[list(PITCH_GROUPS)].mean()
-    count_n = count_group.size()
-    count_lookup = profiles["count"]["lookup"]
-    for raw_key in count_means.index:
-        trackman_id, balls, strikes = (int(value) for value in raw_key)
-        values = {
-            f"tm_entity_count_{metric}_mean": _finite_or_zero(
-                count_means.loc[raw_key, metric]
+
+    means = pitcher[
+        list(TRACKMAN_METRICS)
+    ].mean()
+
+    stds = pitcher[
+        list(ENTITY_STD_METRICS)
+    ].std()
+
+    shares = pitcher[
+        list(PITCH_GROUPS)
+    ].mean()
+
+    counts = pitcher.size()
+
+    # P0 FIX:
+    # every pitcher gets its own most recent strictly-past Trackman season.
+    last_season = (
+        pitcher["season"]
+        .max()
+        .astype(np.int16)
+    )
+
+    pitcher_lookup = (
+        profiles[
+            "pitcher"
+        ][
+            "lookup"
+        ]
+    )
+
+    for trackman_id in means.index:
+        values: Dict[
+            str,
+            float,
+        ] = {}
+
+        for metric in TRACKMAN_METRICS:
+            values[
+                f"tm_entity_{metric}_mean"
+            ] = _finite_or_zero(
+                means.loc[
+                    trackman_id,
+                    metric,
+                ]
             )
-            for metric in TRACKMAN_METRICS
-        }
+
+        for metric in ENTITY_STD_METRICS:
+            values[
+                f"tm_entity_{metric}_std"
+            ] = _finite_or_zero(
+                stds.loc[
+                    trackman_id,
+                    metric,
+                ]
+            )
+
         for group in PITCH_GROUPS:
-            values[f"tm_entity_count_{group}_share"] = _finite_or_zero(
-                count_shares.loc[raw_key, group]
+            values[
+                f"tm_entity_{group}_share"
+            ] = _finite_or_zero(
+                shares.loc[
+                    trackman_id,
+                    group,
+                ]
             )
-        values["tm_entity_count_log_n"] = float(np.log1p(count_n.loc[raw_key]))
-        values["tm_entity_count_available"] = 1.0
-        count_lookup[(target_season, trackman_id, balls, strikes)] = values
 
-    latest_season = int(selected["season"].max())
-    recent = selected.loc[selected["season"] == latest_season]
-    older = selected.loc[selected["season"] < latest_season]
-    if not recent.empty and not older.empty:
-        recent_group = recent.groupby("pitcher_trackman_id", observed=True, sort=False)
-        older_group = older.groupby("pitcher_trackman_id", observed=True, sort=False)
-        recent_means = recent_group[list(TRACKMAN_METRICS)].mean()
-        older_means = older_group[list(TRACKMAN_METRICS)].mean()
-        recent_shares = recent_group[list(PITCH_GROUPS)].mean()
-        older_shares = older_group[list(PITCH_GROUPS)].mean()
-        recent_n = recent_group.size()
-        common = recent_means.index.intersection(older_means.index)
-        recent_lookup = profiles["recent"]["lookup"]
-        for trackman_id in common:
-            values = {
-                f"tm_entity_recent_{metric}_delta": _finite_or_zero(
-                    recent_means.loc[trackman_id, metric]
-                    - older_means.loc[trackman_id, metric]
-                )
-                for metric in TRACKMAN_METRICS
-            }
-            for group in PITCH_GROUPS:
-                values[f"tm_entity_recent_{group}_share_delta"] = _finite_or_zero(
-                    recent_shares.loc[trackman_id, group]
-                    - older_shares.loc[trackman_id, group]
-                )
-            values["tm_entity_recent_log_n"] = float(
-                np.log1p(recent_n.loc[trackman_id])
+        freshness_gap = max(
+            int(target_season)
+            - 1
+            - int(
+                last_season.loc[
+                    trackman_id
+                ]
+            ),
+            0,
+        )
+
+        values[
+            "tm_entity_log_n"
+        ] = float(
+            np.log1p(
+                counts.loc[
+                    trackman_id
+                ]
             )
-            values["tm_entity_recent_available"] = 1.0
-            recent_lookup[(target_season, int(trackman_id))] = values
+        )
 
-    group_profile = selected.groupby(
-        ["pitcher_trackman_id", "pitch_type_group"],
+        values[
+            "tm_entity_freshness_gap"
+        ] = float(
+            freshness_gap
+        )
+
+        values[
+            "tm_entity_is_fresh"
+        ] = float(
+            freshness_gap == 0
+        )
+
+        values[
+            "tm_entity_stale_2plus"
+        ] = float(
+            freshness_gap >= 2
+        )
+
+        values[
+            "tm_entity_available"
+        ] = 1.0
+
+        pitcher_lookup[
+            (
+                target_season,
+                int(trackman_id),
+            )
+        ] = values
+
+    # --------------------------------------------------------
+    # Pitcher x pre-pitch count profile.
+    # --------------------------------------------------------
+    count_group = selected.groupby(
+        [
+            "pitcher_trackman_id",
+            "balls_before",
+            "strikes_before",
+        ],
         observed=True,
         sort=False,
-    )[list(TRACKMAN_METRICS)].agg(["mean", "size"])
-    arsenal_lookup = profiles["arsenal"]["lookup"]
-    for trackman_id in sorted(trackman_ids):
-        values: Dict[str, float] = {}
+    )
+
+    count_means = count_group[
+        list(TRACKMAN_METRICS)
+    ].mean()
+
+    count_shares = count_group[
+        list(PITCH_GROUPS)
+    ].mean()
+
+    count_n = count_group.size()
+
+    count_lookup = (
+        profiles[
+            "count"
+        ][
+            "lookup"
+        ]
+    )
+
+    for raw_key in count_means.index:
+        (
+            trackman_id,
+            balls,
+            strikes,
+        ) = (
+            int(value)
+            for value
+            in raw_key
+        )
+
+        values = {
+            (
+                f"tm_entity_count_"
+                f"{metric}_mean"
+            ): _finite_or_zero(
+                count_means.loc[
+                    raw_key,
+                    metric,
+                ]
+            )
+            for metric
+            in TRACKMAN_METRICS
+        }
+
+        for group in PITCH_GROUPS:
+            values[
+                (
+                    "tm_entity_count_"
+                    f"{group}_share"
+                )
+            ] = _finite_or_zero(
+                count_shares.loc[
+                    raw_key,
+                    group,
+                ]
+            )
+
+        values[
+            "tm_entity_count_log_n"
+        ] = float(
+            np.log1p(
+                count_n.loc[
+                    raw_key
+                ]
+            )
+        )
+
+        values[
+            "tm_entity_count_available"
+        ] = 1.0
+
+        count_lookup[
+            (
+                target_season,
+                trackman_id,
+                balls,
+                strikes,
+            )
+        ] = values
+
+    # --------------------------------------------------------
+    # Per-pitcher latest season vs that pitcher's older history.
+    # --------------------------------------------------------
+    latest_by_row = (
+        selected[
+            "pitcher_trackman_id"
+        ]
+        .map(last_season)
+    )
+
+    recent = selected.loc[
+        selected["season"]
+        == latest_by_row
+    ]
+
+    older = selected.loc[
+        selected["season"]
+        < latest_by_row
+    ]
+
+    if (
+        not recent.empty
+        and not older.empty
+    ):
+        recent_group = recent.groupby(
+            "pitcher_trackman_id",
+            observed=True,
+            sort=False,
+        )
+        older_group = older.groupby(
+            "pitcher_trackman_id",
+            observed=True,
+            sort=False,
+        )
+
+        recent_means = recent_group[
+            list(TRACKMAN_METRICS)
+        ].mean()
+
+        older_means = older_group[
+            list(TRACKMAN_METRICS)
+        ].mean()
+
+        recent_shares = recent_group[
+            list(PITCH_GROUPS)
+        ].mean()
+
+        older_shares = older_group[
+            list(PITCH_GROUPS)
+        ].mean()
+
+        recent_n = (
+            recent_group.size()
+        )
+
+        common = (
+            recent_means.index
+            .intersection(
+                older_means.index
+            )
+        )
+
+        recent_lookup = (
+            profiles[
+                "recent"
+            ][
+                "lookup"
+            ]
+        )
+
+        for trackman_id in common:
+            values = {
+                (
+                    "tm_entity_recent_"
+                    f"{metric}_delta"
+                ): _finite_or_zero(
+                    recent_means.loc[
+                        trackman_id,
+                        metric,
+                    ]
+                    - older_means.loc[
+                        trackman_id,
+                        metric,
+                    ]
+                )
+                for metric
+                in TRACKMAN_METRICS
+            }
+
+            for group in PITCH_GROUPS:
+                values[
+                    (
+                        "tm_entity_recent_"
+                        f"{group}_share_delta"
+                    )
+                ] = _finite_or_zero(
+                    recent_shares.loc[
+                        trackman_id,
+                        group,
+                    ]
+                    - older_shares.loc[
+                        trackman_id,
+                        group,
+                    ]
+                )
+
+            values[
+                "tm_entity_recent_log_n"
+            ] = float(
+                np.log1p(
+                    recent_n.loc[
+                        trackman_id
+                    ]
+                )
+            )
+
+            values[
+                "tm_entity_recent_available"
+            ] = 1.0
+
+            recent_lookup[
+                (
+                    target_season,
+                    int(trackman_id),
+                )
+            ] = values
+
+    # --------------------------------------------------------
+    # Arsenal separation.
+    # --------------------------------------------------------
+    group_profile = selected.groupby(
+        [
+            "pitcher_trackman_id",
+            "pitch_type_group",
+        ],
+        observed=True,
+        sort=False,
+    )[
+        list(TRACKMAN_METRICS)
+    ].agg(
+        [
+            "mean",
+            "size",
+        ]
+    )
+
+    arsenal_lookup = (
+        profiles[
+            "arsenal"
+        ][
+            "lookup"
+        ]
+    )
+
+    for trackman_id in sorted(
+        trackman_ids
+    ):
+        values: Dict[
+            str,
+            float,
+        ] = {}
+
         available_pairs = 0
-        for comparison, other in (("fb_break", "breaking"), ("fb_off", "offspeed")):
-            fast_key = (trackman_id, "fastball")
-            other_key = (trackman_id, other)
-            if fast_key not in group_profile.index or other_key not in group_profile.index:
+
+        for comparison, other in (
+            (
+                "fb_break",
+                "breaking",
+            ),
+            (
+                "fb_off",
+                "offspeed",
+            ),
+        ):
+            fast_key = (
+                trackman_id,
+                "fastball",
+            )
+            other_key = (
+                trackman_id,
+                other,
+            )
+
+            if (
+                fast_key
+                not in group_profile.index
+                or other_key
+                not in group_profile.index
+            ):
                 for metric in TRACKMAN_METRICS:
-                    values[f"tm_entity_{comparison}_{metric}_gap"] = 0.0
+                    values[
+                        (
+                            "tm_entity_"
+                            f"{comparison}_"
+                            f"{metric}_gap"
+                        )
+                    ] = 0.0
                 continue
-            fast_n = float(group_profile.loc[fast_key, (TRACKMAN_METRICS[0], "size")])
-            other_n = float(group_profile.loc[other_key, (TRACKMAN_METRICS[0], "size")])
-            pair_available = fast_n >= 20.0 and other_n >= 20.0
-            available_pairs += int(pair_available)
+
+            fast_n = float(
+                group_profile.loc[
+                    fast_key,
+                    (
+                        TRACKMAN_METRICS[0],
+                        "size",
+                    ),
+                ]
+            )
+
+            other_n = float(
+                group_profile.loc[
+                    other_key,
+                    (
+                        TRACKMAN_METRICS[0],
+                        "size",
+                    ),
+                ]
+            )
+
+            pair_available = (
+                fast_n >= 20.0
+                and other_n >= 20.0
+            )
+
+            available_pairs += int(
+                pair_available
+            )
+
             for metric in TRACKMAN_METRICS:
                 gap = (
-                    group_profile.loc[fast_key, (metric, "mean")]
-                    - group_profile.loc[other_key, (metric, "mean")]
+                    group_profile.loc[
+                        fast_key,
+                        (
+                            metric,
+                            "mean",
+                        ),
+                    ]
+                    - group_profile.loc[
+                        other_key,
+                        (
+                            metric,
+                            "mean",
+                        ),
+                    ]
                     if pair_available
                     else 0.0
                 )
-                values[f"tm_entity_{comparison}_{metric}_gap"] = _finite_or_zero(gap)
-        values["tm_entity_arsenal_available_pairs"] = float(available_pairs)
-        arsenal_lookup[(target_season, trackman_id)] = values
+
+                values[
+                    (
+                        "tm_entity_"
+                        f"{comparison}_"
+                        f"{metric}_gap"
+                    )
+                ] = _finite_or_zero(
+                    gap
+                )
+
+        values[
+            "tm_entity_arsenal_available_pairs"
+        ] = float(
+            available_pairs
+        )
+
+        arsenal_lookup[
+            (
+                target_season,
+                trackman_id,
+            )
+        ] = values
 
 
 class StrictPastTrackmanFeatures:
@@ -278,7 +665,7 @@ class StrictPastTrackmanFeatures:
         hand_lookup: Dict[tuple, Dict[str, float]] = {}
         count_lookup: Dict[tuple, Dict[str, float]] = {}
         hand_names: list[str] = []
-        count_names: list[str] = []
+        hand_count_names: list[str] = []
 
         for target_season in range(min_season, max_target_season + 1):
             past = tm.loc[tm["season"] < target_season]
@@ -293,7 +680,7 @@ class StrictPastTrackmanFeatures:
             for key, values in per_hand.items():
                 hand_lookup[(target_season, *key)] = values
 
-            per_count, count_names = _summarize_profile(
+            per_count, hand_count_names = _summarize_profile(
                 past,
                 group_cols=(
                     "pitcher_hand",
@@ -334,46 +721,120 @@ class StrictPastTrackmanFeatures:
                 "tm_entity_map_main_log_n",
                 "tm_entity_map_trackman_log_n",
                 "tm_entity_map_count_ratio",
+                "tm_entity_map_team_available",
                 "tm_entity_map_team_agreement",
                 "tm_entity_map_stable",
                 "tm_entity_map_available",
             ]
+
             pitcher_names = [
-                *(f"tm_entity_{metric}_mean" for metric in TRACKMAN_METRICS),
-                *(f"tm_entity_{metric}_std" for metric in ENTITY_STD_METRICS),
-                *(f"tm_entity_{group}_share" for group in PITCH_GROUPS),
+                *(
+                    f"tm_entity_{metric}_mean"
+                    for metric
+                    in TRACKMAN_METRICS
+                ),
+                *(
+                    f"tm_entity_{metric}_std"
+                    for metric
+                    in ENTITY_STD_METRICS
+                ),
+                *(
+                    f"tm_entity_{group}_share"
+                    for group
+                    in PITCH_GROUPS
+                ),
                 "tm_entity_log_n",
+                *(
+                    (
+                        "tm_entity_freshness_gap",
+                        "tm_entity_is_fresh",
+                        "tm_entity_stale_2plus",
+                    )
+                    if self.config.trackman_entity_v2_enabled
+                    else ()
+                ),
                 "tm_entity_available",
             ]
-            count_names = [
-                *(f"tm_entity_count_{metric}_mean" for metric in TRACKMAN_METRICS),
-                *(f"tm_entity_count_{group}_share" for group in PITCH_GROUPS),
+
+            entity_count_names = [
+                *(
+                    (
+                        "tm_entity_count_"
+                        f"{metric}_mean"
+                    )
+                    for metric
+                    in TRACKMAN_METRICS
+                ),
+                *(
+                    (
+                        "tm_entity_count_"
+                        f"{group}_share"
+                    )
+                    for group
+                    in PITCH_GROUPS
+                ),
                 "tm_entity_count_log_n",
                 "tm_entity_count_available",
             ]
+
             recent_names = [
-                *(f"tm_entity_recent_{metric}_delta" for metric in TRACKMAN_METRICS),
                 *(
-                    f"tm_entity_recent_{group}_share_delta"
-                    for group in PITCH_GROUPS
+                    (
+                        "tm_entity_recent_"
+                        f"{metric}_delta"
+                    )
+                    for metric
+                    in TRACKMAN_METRICS
+                ),
+                *(
+                    (
+                        "tm_entity_recent_"
+                        f"{group}_share_delta"
+                    )
+                    for group
+                    in PITCH_GROUPS
                 ),
                 "tm_entity_recent_log_n",
                 "tm_entity_recent_available",
             ]
+
             arsenal_names = [
                 *(
-                    f"tm_entity_{comparison}_{metric}_gap"
-                    for comparison in ("fb_break", "fb_off")
-                    for metric in TRACKMAN_METRICS
+                    (
+                        "tm_entity_"
+                        f"{comparison}_"
+                        f"{metric}_gap"
+                    )
+                    for comparison
+                    in (
+                        "fb_break",
+                        "fb_off",
+                    )
+                    for metric
+                    in TRACKMAN_METRICS
                 ),
                 "tm_entity_arsenal_available_pairs",
             ]
-            entity_profiles: Dict[str, Dict[str, object]] = {
-                "mapping": _empty_profile(mapping_names),
-                "pitcher": _empty_profile(pitcher_names),
-                "count": _empty_profile(count_names),
-                "recent": _empty_profile(recent_names),
-                "arsenal": _empty_profile(arsenal_names),
+
+            entity_profiles: Dict[
+                str,
+                Dict[str, object],
+            ] = {
+                "mapping": _empty_profile(
+                    mapping_names
+                ),
+                "pitcher": _empty_profile(
+                    pitcher_names
+                ),
+                "count": _empty_profile(
+                    entity_count_names
+                ),
+                "recent": _empty_profile(
+                    recent_names
+                ),
+                "arsenal": _empty_profile(
+                    arsenal_names
+                ),
             }
             audits: Dict[int, Dict[str, object]] = {}
             previous_top1: Dict[int, int] = {}
@@ -407,6 +868,9 @@ class StrictPastTrackmanFeatures:
                             raw_values["trackman_log_n"]
                         ),
                         "tm_entity_map_count_ratio": float(raw_values["count_ratio"]),
+                        "tm_entity_map_team_available": float(
+                            raw_values["team_available"]
+                        ),                        
                         "tm_entity_map_team_agreement": float(
                             raw_values["team_agreement"]
                         ),
@@ -427,31 +891,112 @@ class StrictPastTrackmanFeatures:
                     f"[FEATURE] Entity target={target_season} "
                     f"matched={result.audit['matched_pitchers']:,} "
                     f"coverage={result.audit['row_coverage']:.3f} "
+                    f"candidates={result.audit['accepted_candidate_count']:,} "
+                    f"collision_excess={result.audit['collision_excess']:,} "
+                    f"collision_rate={result.audit['collision_rate']:.3f} "
                     f"teams={len(result.team_map)}"
                 )
 
             final_target = max_target_season
-            final_audit = audits.get(final_target, {})
+            final_audit = audits.get(
+                final_target,
+                {},
+            )
+
             audit_checks = {
-                "matched_pitchers": int(final_audit.get("matched_pitchers", 0))
-                >= int(self.config.trackman_entity_min_matched_pitchers),
-                "row_coverage": float(final_audit.get("row_coverage", 0.0))
-                >= float(self.config.trackman_entity_min_row_coverage),
-                "team_mappings": len(final_audit.get("team_map", {}))
-                >= int(self.config.trackman_entity_min_team_mappings),
-                "one_to_one": int(final_audit.get("collision_count", 1)) == 0,
+                "matched_pitchers": (
+                    int(
+                        final_audit.get(
+                            "matched_pitchers",
+                            0,
+                        )
+                    )
+                    >= int(
+                        self.config
+                        .trackman_entity_min_matched_pitchers
+                    )
+                ),
+                "row_coverage": (
+                    float(
+                        final_audit.get(
+                            "row_coverage",
+                            0.0,
+                        )
+                    )
+                    >= float(
+                        self.config
+                        .trackman_entity_min_row_coverage
+                    )
+                ),
+                "team_mappings": (
+                    len(
+                        final_audit.get(
+                            "team_map",
+                            {},
+                        )
+                    )
+                    >= int(
+                        self.config
+                        .trackman_entity_min_team_mappings
+                    )
+                ),
+                "collision_audit_present": all(
+                    key in final_audit
+                    for key in (
+                        "accepted_candidate_count",
+                        "unique_trackman_candidate_count",
+                        "collision_excess",
+                        "collision_rate",
+                    )
+                ),
+                "one_to_one": bool(
+                    final_audit.get(
+                        "final_one_to_one",
+                        False,
+                    )
+                ),
             }
-            if not all(audit_checks.values()):
+
+            if not all(
+                audit_checks.values()
+            ):
                 raise RuntimeError(
-                    "Trackman entity-resolution quality gate failed: "
-                    f"checks={audit_checks}, observed={final_audit}"
+                    "Trackman entity-resolution "
+                    "quality gate failed: "
+                    f"checks={audit_checks}, "
+                    f"observed={final_audit}"
                 )
+
             entity_state = {
-                "state_version": 1,
+                "state_version": 3,
                 "profiles": entity_profiles,
                 "audits": audits,
-                "final_target_season": final_target,
-                "thresholds": thresholds.__dict__.copy(),
+                "final_target_season": (
+                    final_target
+                ),
+                "thresholds": (
+                    thresholds
+                    .__dict__
+                    .copy()
+                ),
+                "v2": {
+                    "enabled": bool(
+                        self.config
+                        .trackman_entity_v2_enabled
+                    ),
+                    "pool_strength": float(
+                        self.config
+                        .trackman_entity_pool_strength
+                    ),
+                    "count_pool_strength": float(
+                        self.config
+                        .trackman_entity_count_pool_strength
+                    ),
+                    "freshness_decay": float(
+                        self.config
+                        .trackman_entity_freshness_decay
+                    ),
+                },
             }
 
         self.state_ = {
@@ -466,8 +1011,12 @@ class StrictPastTrackmanFeatures:
                 },
                 "hand_count": {
                     "lookup": count_lookup,
-                    "feature_names": count_names,
-                    "defaults": {name: 0.0 for name in count_names},
+                    "feature_names": hand_count_names,
+                    "defaults": {
+                        name: 0.0
+                        for name
+                        in hand_count_names
+                    },
                 },
             },
             "entity": entity_state,

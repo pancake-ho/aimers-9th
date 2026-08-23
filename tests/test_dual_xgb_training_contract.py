@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import unittest
 
+import pandas as pd
 import numpy as np
 
 from src.training import (
     _apply_temporal_xgb_blend,
+    _split_entity_feature_view,
 )
-
 
 class DualXGBTrainingContractTests(
     unittest.TestCase
@@ -62,6 +63,95 @@ class DualXGBTrainingContractTests(
                 },
             },
         }
+
+    def test_entity_ablation_removes_only_entity_feature_family(
+        self,
+    ) -> None:
+        X = pd.DataFrame(
+            {
+                "balls_before": [
+                    0.0,
+                    1.0,
+                ],
+                "tm_hand_rel_speed_mean": [
+                    90.0,
+                    91.0,
+                ],
+                "tm_count_rel_speed_mean": [
+                    89.0,
+                    90.0,
+                ],
+                "tm_entity_map_confidence": [
+                    0.8,
+                    0.6,
+                ],
+                "tm_entity_rel_speed_mean": [
+                    92.0,
+                    93.0,
+                ],
+                "tm_entity_rel_speed_pooled": [
+                    91.0,
+                    91.5,
+                ],
+            }
+        )
+
+        baseline, entity_columns = (
+            _split_entity_feature_view(
+                X
+            )
+        )
+
+        self.assertEqual(
+            entity_columns,
+            [
+                "tm_entity_map_confidence",
+                "tm_entity_rel_speed_mean",
+                "tm_entity_rel_speed_pooled",
+            ],
+        )
+
+        self.assertEqual(
+            list(
+                baseline.columns
+            ),
+            [
+                "balls_before",
+                "tm_hand_rel_speed_mean",
+                "tm_count_rel_speed_mean",
+            ],
+        )
+
+        self.assertTrue(
+            all(
+                not column.startswith(
+                    "tm_entity_"
+                )
+                for column
+                in baseline.columns
+            )
+        )
+
+    def test_entity_ablation_requires_entity_columns(
+        self,
+    ) -> None:
+        X = pd.DataFrame(
+            {
+                "balls_before": [
+                    0.0,
+                ],
+                "tm_hand_rel_speed_mean": [
+                    90.0,
+                ],
+            }
+        )
+
+        with self.assertRaises(
+            ValueError
+        ):
+            _split_entity_feature_view(
+                X
+            )
 
     def test_temporal_blend_replaces_xgb_prediction(
         self,

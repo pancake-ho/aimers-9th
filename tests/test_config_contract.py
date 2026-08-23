@@ -85,9 +85,27 @@ class ConfigContractTests(
             config.use_main_history
         )
 
-        self.assertFalse(
-            config.features
-            .trackman_entity_enabled
+        self.assertTrue(
+            config.features.trackman_entity_enabled
+        )
+        self.assertTrue(
+            config.features.trackman_entity_v2_enabled
+        )
+        self.assertEqual(
+            config.features.trackman_entity_team_penalty,
+            2.0,
+        )
+        self.assertEqual(
+            config.features.trackman_entity_min_team_mappings,
+            0,
+        )
+        self.assertGreater(
+            config.features.trackman_entity_pool_strength,
+            0.0,
+        )
+        self.assertGreater(
+            config.features.trackman_entity_count_pool_strength,
+            0.0,
         )
 
         self.assertIn(

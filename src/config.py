@@ -60,24 +60,42 @@ class FeatureConfig:
     history_count_matchup_strength: float = 100.0
 
     # Official-file-only entity resolution between main pitcher_id and the
-    # disjoint pitcher_trackman_id namespace.  Ambiguous pairs are rejected;
-    # rejected/unseen pitchers retain the existing hand/count Trackman
-    # fallback.  Thresholds are label-free and fixed before temporal scoring.
-    trackman_entity_enabled: bool = False
+    # disjoint pitcher_trackman_id namespace.
+    #
+    # Team information is used only as a soft signal learned from exact raw
+    # tokens contained in the official files. No semantic team aliases or
+    # external baseball knowledge are used.
+    trackman_entity_enabled: bool = True
+    trackman_entity_v2_enabled: bool = True
+
     trackman_entity_min_pitches: int = 300
     trackman_entity_max_distance: float = 10.0
     trackman_entity_min_margin_ratio: float = 1.35
     trackman_entity_strong_margin_ratio: float = 2.0
     trackman_entity_min_count_ratio: float = 0.55
     trackman_entity_max_count_ratio: float = 1.80
-    trackman_entity_team_penalty: float = 16.0
+
+    # Team is deliberately soft. A mismatch adds distance but can never by
+    # itself reject an otherwise high-confidence official-data identity.
+    trackman_entity_team_penalty: float = 2.0
     trackman_entity_team_min_support: int = 3
     trackman_entity_team_min_dominance: float = 0.50
-    # Fail closed if the final 2019--2024 -> 2025 resolver is too sparse or
-    # violates its one-to-one contract.  This prevents a silent weak submit.
+
+    # V2 partial pooling:
+    # alpha = mapping_confidence
+    #       * n / (n + strength)
+    #       * exp(-freshness_decay * freshness_gap)
+    trackman_entity_pool_strength: float = 500.0
+    trackman_entity_count_pool_strength: float = 100.0
+    trackman_entity_freshness_decay: float = 0.70
+
+    # Structural production gates.
     trackman_entity_min_matched_pitchers: int = 150
     trackman_entity_min_row_coverage: float = 0.45
-    trackman_entity_min_team_mappings: int = 9
+
+    # Exact official raw-team tokens are auxiliary only. They are not required
+    # to cover all organizations, so team coverage must not block the resolver.
+    trackman_entity_min_team_mappings: int = 0
 
     # All are fitted on training rows only. High-cardinality player IDs are
     # intentionally categorical: CatBoost's ordered statistics can use them
