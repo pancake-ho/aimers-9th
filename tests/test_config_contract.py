@@ -173,19 +173,19 @@ class ConfigContractTests(
         self.assertEqual(
             config
             .submission_gate_previous_2024_raw_brier,
-            0.24802482024929126,
+            0.2480388865242645,
         )
 
         self.assertEqual(
             config
             .submission_gate_previous_late_calibrated_brier,
-            0.24784041429332387,
+            0.2477184595089623,
         )
 
         self.assertEqual(
             config
             .submission_gate_previous_forward_brier,
-            0.24803627124515615,
+            0.24798923858583477,
         )
 
         self.assertEqual(

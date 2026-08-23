@@ -69,10 +69,10 @@ def _strategy_name(
 ) -> str:
     if model_order == GBDT_MODEL_ORDER:
         return (
-            "temporal_xgb_timeviews_"
-            "bag3_recent1_recent2_"
-            "lgb_cat_fixedchamp_"
-            "calibrated_v13"
+            "temporal_xgb_entityv2_"
+            "timeviews_bag3_recent1_recent2_"
+            "lgb_cat_auxbase_"
+            "fixedchamp_calibrated_v14"
         )
 
     if model_order == (
@@ -80,10 +80,10 @@ def _strategy_name(
         "resnet",
     ):
         return (
-            "temporal_xgb_timeviews_"
-            "bag3_recent1_recent2_"
-            "lgb_cat_resnet_"
-            "fixedchamp_calibrated_v13"
+            "temporal_xgb_entityv2_"
+            "timeviews_bag3_recent1_recent2_"
+            "lgb_cat_resnet_auxbase_"
+            "fixedchamp_calibrated_v14"
         )
 
     if model_order == (
@@ -92,10 +92,10 @@ def _strategy_name(
         "ft_transformer",
     ):
         return (
-            "temporal_xgb_timeviews_"
-            "bag3_recent1_recent2_"
-            "lgb_cat_resnet_ftt_"
-            "fixedchamp_calibrated_v13"
+            "temporal_xgb_entityv2_"
+            "timeviews_bag3_recent1_recent2_"
+            "lgb_cat_resnet_ftt_auxbase_"
+            "fixedchamp_calibrated_v14"
         )
 
     raise ValueError(
@@ -816,6 +816,80 @@ def run_temporal_validation(
         gc.collect()
 
         # --------------------------------------------------------
+        # V14 model-specific feature routing.
+        #
+        # XGBoost keeps the complete 269-feature table, including the
+        # validated pitcher-level Trackman entity family.
+        #
+        # Auxiliary models retain the pre-entity champion feature space.
+        # This isolates the entity experiment to logical XGBoost instead of
+        # silently changing every model behind frozen champion weights.
+        # --------------------------------------------------------
+
+        if entity_gate_required:
+            (
+                X_train_aux,
+                aux_entity_columns,
+            ) = _split_entity_feature_view(
+                X_train
+            )
+
+            X_valid_aux = X_valid.drop(
+                columns=aux_entity_columns
+            )
+        else:
+            X_train_aux = X_train
+            X_valid_aux = X_valid
+            aux_entity_columns = []
+
+        aux_cat_cols = [
+            column
+            for column in preprocessor.cat_cols_
+            if column in X_train_aux.columns
+        ]
+
+        aux_num_cols = [
+            column
+            for column in preprocessor.num_cols_
+            if column in X_train_aux.columns
+        ]
+
+        aux_categorical_indices = [
+            int(
+                X_train_aux.columns.get_loc(
+                    column
+                )
+            )
+            for column in aux_cat_cols
+        ]
+
+        if (
+            entity_gate_required
+            and len(aux_entity_columns) == 0
+        ):
+            raise RuntimeError(
+                "Entity routing is enabled but "
+                "no tm_entity_* columns were removed."
+            )
+
+        if not X_train_aux.columns.equals(
+            X_valid_aux.columns
+        ):
+            raise RuntimeError(
+                "Auxiliary train/valid feature "
+                "columns do not match."
+            )
+
+        print(
+            "[FEATURE-ROUTING] "
+            f"fold={fold.validation_label} "
+            f"xgb_features={X_train.shape[1]} "
+            f"aux_features={X_train_aux.shape[1]} "
+            f"entity_only_features="
+            f"{len(aux_entity_columns)}"
+        )        
+
+        # --------------------------------------------------------
         # LightGBM
         # --------------------------------------------------------
         start = time.perf_counter()
@@ -825,12 +899,12 @@ def run_temporal_validation(
             predictions["lgb"],
             best_iterations["lgb"],
         ) = train_lightgbm_fold(
-            X_train,
+            X_train_aux,
             y_train,
-            X_valid,
+            X_valid_aux,
             y_valid,
             sample_weight,
-            preprocessor.categorical_indices,
+            aux_categorical_indices,
             config.models,
         )
 
@@ -858,14 +932,16 @@ def run_temporal_validation(
         gc.collect()
 
         start = time.perf_counter()
-        cat_model, predictions["cat"], best_iterations["cat"] = train_catboost_fold(
-            X_train,
-            y_train,
-            X_valid,
-            y_valid,
-            sample_weight,
-            preprocessor.categorical_indices,
-            config.models,
+        cat_model, predictions["cat"], best_iterations["cat"] = (
+            train_catboost_fold(
+                X_train_aux,
+                y_train,
+                X_valid_aux,
+                y_valid,
+                sample_weight,
+                aux_categorical_indices,
+                config.models,
+            )
         )
         elapsed = time.perf_counter() - start
         per_model_metrics["cat"] = evaluate_probabilities(y_valid, predictions["cat"])
@@ -883,12 +959,23 @@ def run_temporal_validation(
             )
 
             neural_preprocessor = NeuralPreprocessor(
-                categorical_cols=preprocessor.cat_cols_,
-                numerical_cols=preprocessor.num_cols_,
-            ).fit(X_train)
-            neural_state = neural_preprocessor.export_state()
-            train_arrays = prepare_neural_arrays(X_train, neural_state)
-            valid_arrays = prepare_neural_arrays(X_valid, neural_state)
+                categorical_cols=aux_cat_cols,
+                numerical_cols=aux_num_cols,
+            ).fit(X_train_aux)
+
+            neural_state = (
+                neural_preprocessor.export_state()
+            )
+
+            train_arrays = prepare_neural_arrays(
+                X_train_aux,
+                neural_state,
+            )
+
+            valid_arrays = prepare_neural_arrays(
+                X_valid_aux,
+                neural_state,
+            )
 
             for offset, kind in enumerate(neural_model_order, start=1):
                 start = time.perf_counter()
@@ -914,7 +1001,13 @@ def run_temporal_validation(
 
             del train_arrays, valid_arrays, neural_state
 
-        del X_train, X_valid, sample_weight
+        del (
+            X_train,
+            X_valid,
+            X_train_aux,
+            X_valid_aux,
+            sample_weight,
+        )
         gc.collect()
 
         fold_results.append(
@@ -991,6 +1084,21 @@ def run_temporal_validation(
                         temporal_view_metrics
                     ),
                 },
+
+                "feature_routing": {
+                    "xgb_feature_count": int(
+                        len(
+                            preprocessor.feature_names_
+                        )
+                    ),
+                    "auxiliary_feature_count": int(
+                        len(aux_cat_cols)
+                        + len(aux_num_cols)
+                    ),
+                    "entity_only_feature_count": int(
+                        len(aux_entity_columns)
+                    ),
+                },                
             }
         )
 
@@ -2258,6 +2366,78 @@ def train_and_save_final_models(
 
     gc.collect()
 
+    # --------------------------------------------------------
+    # V14 auxiliary champion feature view.
+    #
+    # XGB models above intentionally keep Trackman entity v2.
+    # LGB/Cat/neural below use the original non-entity feature space.
+    # --------------------------------------------------------
+
+    entity_routing_enabled = bool(
+        config.use_trackman
+        and config.features.trackman_entity_enabled
+    )
+
+    if entity_routing_enabled:
+        (
+            X_aux,
+            aux_entity_columns,
+        ) = _split_entity_feature_view(
+            X
+        )
+    else:
+        X_aux = X
+        aux_entity_columns = []
+
+    auxiliary_feature_names = list(
+        X_aux.columns
+    )
+
+    aux_cat_cols = [
+        column
+        for column in preprocessor.cat_cols_
+        if column in X_aux.columns
+    ]
+
+    aux_num_cols = [
+        column
+        for column in preprocessor.num_cols_
+        if column in X_aux.columns
+    ]
+
+    aux_categorical_indices = [
+        int(
+            X_aux.columns.get_loc(
+                column
+            )
+        )
+        for column in aux_cat_cols
+    ]
+
+    if (
+        entity_routing_enabled
+        and not aux_entity_columns
+    ):
+        raise RuntimeError(
+            "Final entity routing removed no "
+            "tm_entity_* features."
+        )
+
+    if len(auxiliary_feature_names) != len(
+        set(auxiliary_feature_names)
+    ):
+        raise RuntimeError(
+            "Duplicate auxiliary feature names."
+        )
+
+    print(
+        "[FINAL-FEATURE-ROUTING] "
+        f"xgb_features={X.shape[1]} "
+        f"aux_features={X_aux.shape[1]} "
+        f"entity_only_features="
+        f"{len(aux_entity_columns)}"
+    )
+
     lgb_rounds = int(
         ensemble_state[
             "final_iterations"
@@ -2270,10 +2450,10 @@ def train_and_save_final_models(
     )
 
     lgb_model = train_lightgbm_full(
-        X,
+        X_aux,
         y,
         sample_weight,
-        preprocessor.categorical_indices,
+        aux_categorical_indices,
         config.models,
         num_boost_round=lgb_rounds,
     )
@@ -2292,10 +2472,10 @@ def train_and_save_final_models(
     cat_iterations = int(ensemble_state["final_iterations"]["cat"])
     print(f"[FINAL] Training CatBoost for {cat_iterations} iterations...")
     cat_model = train_catboost_full(
-        X,
+        X_aux,
         y,
         sample_weight,
-        preprocessor.categorical_indices,
+        aux_categorical_indices,
         config.models,
         iterations=cat_iterations,
     )
@@ -2317,11 +2497,18 @@ def train_and_save_final_models(
         )
 
         neural_preprocessor = NeuralPreprocessor(
-            categorical_cols=preprocessor.cat_cols_,
-            numerical_cols=preprocessor.num_cols_,
-        ).fit(X)
-        neural_state = neural_preprocessor.export_state()
-        train_arrays = prepare_neural_arrays(X, neural_state)
+            categorical_cols=aux_cat_cols,
+            numerical_cols=aux_num_cols,
+        ).fit(X_aux)
+
+        neural_state = (
+            neural_preprocessor.export_state()
+        )
+
+        train_arrays = prepare_neural_arrays(
+            X_aux,
+            neural_state,
+        )
         for offset, kind in enumerate(neural_model_order, start=1):
             epochs = int(ensemble_state["final_iterations"][kind])
             print(f"[FINAL] Training {kind} for {epochs} epochs...")
@@ -2342,7 +2529,7 @@ def train_and_save_final_models(
             release_torch_memory()
         del train_arrays
 
-    del X, sample_weight
+    del X, X_aux, sample_weight
     gc.collect()
 
     raw_feature_cols = [col for col in train.columns if col != target]
@@ -2352,7 +2539,31 @@ def train_and_save_final_models(
         "target_col": target,
         "expected_raw_columns": raw_feature_cols,
         "feature_state": dict(feature_state),
-        "preprocessor_state": preprocessor.export_state(),
+        "preprocessor_state": (
+            preprocessor.export_state()
+        ),
+
+        "auxiliary_feature_names": list(
+            auxiliary_feature_names
+        ),
+
+        "feature_routing": {
+            "policy": (
+                "entity_v2_xgb_only_auxiliary_base"
+            ),
+            "xgb_feature_count": int(
+                len(
+                    preprocessor.feature_names_
+                )
+            ),
+            "auxiliary_feature_count": int(
+                len(auxiliary_feature_names)
+            ),
+            "entity_only_feature_count": int(
+                len(aux_entity_columns)
+            ),
+        },
+
         "neural_preprocessor_state": neural_state,
         "ensemble": dict(ensemble_state),
         "quality_assessment": dict(
@@ -2457,6 +2668,26 @@ def train_and_save_final_models(
         "calibration": dict(ensemble_state["calibration"]),
         "final_iterations": dict(ensemble_state["final_iterations"]),
         "n_features": int(len(preprocessor.feature_names_)),
+        "n_auxiliary_features": int(
+            len(auxiliary_feature_names)
+        ),
+
+        "feature_routing": {
+            "policy": (
+                "entity_v2_xgb_only_auxiliary_base"
+            ),
+            "xgb_feature_count": int(
+                len(
+                    preprocessor.feature_names_
+                )
+            ),
+            "auxiliary_feature_count": int(
+                len(auxiliary_feature_names)
+            ),
+            "entity_only_feature_count": int(
+                len(aux_entity_columns)
+            ),
+        },        
         "quality_assessment": dict(
             ensemble_state.get(
                 "quality_assessment",

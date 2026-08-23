@@ -496,21 +496,22 @@ class ExperimentConfig:
 
     submission_gate_xgb_bagging_late_min_gain: float = 0.0
 
-    # V10 champion forward-validation anchor.
+    # V14 previous-candidate validation anchor.
     #
-    # Frozen before V11 evaluation.
-    # Public leaderboard statistics are not used
-    # for model fitting, calibration, or gating.
+    # These are validation values from the completed entity-v2/all-model
+    # experiment that produced Public LB 914.7119.
+    # Public-LB score itself is never used in fitting or calibration.
+
     submission_gate_previous_forward_brier: float = (
-        0.24803627124515615
+        0.24798923858583477
     )
 
     submission_gate_previous_2024_raw_brier: float = (
-        0.24802482024929126
+        0.2480388865242645
     )
 
     submission_gate_previous_late_calibrated_brier: float = (
-        0.24784041429332387
+        0.2477184595089623
     )
 
     submission_gate_previous_2024_min_gain: float = 0.0

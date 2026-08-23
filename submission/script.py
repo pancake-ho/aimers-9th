@@ -454,14 +454,67 @@ def main() -> None:
         features,
         bundle["preprocessor_state"],
     )
+    auxiliary_feature_names = list(
+        bundle.get(
+            "auxiliary_feature_names",
+            list(X.columns),
+        )
+    )
+
+    if not auxiliary_feature_names:
+        raise ValueError(
+            "Auxiliary feature view is empty."
+        )
+
+    if len(auxiliary_feature_names) != len(
+        set(auxiliary_feature_names)
+    ):
+        raise ValueError(
+            "Duplicate auxiliary feature names "
+            "in bundle."
+        )
+
+    missing_auxiliary_features = [
+        name
+        for name in auxiliary_feature_names
+        if name not in X.columns
+    ]
+
+    if missing_auxiliary_features:
+        raise ValueError(
+            "Auxiliary feature view is missing "
+            "runtime columns: "
+            f"{missing_auxiliary_features[:20]}"
+        )
+
+    X_aux = X.loc[
+        :,
+        auxiliary_feature_names,
+    ]
+
+    routing = bundle.get(
+        "feature_routing",
+        {},
+    )
+
+    print(
+        "[FEATURE-ROUTING] "
+        f"policy="
+        f"{routing.get('policy', 'legacy_all_features')} "
+        f"xgb_features={X.shape[1]} "
+        f"aux_features={X_aux.shape[1]}"
+    )    
+    
 
     del features
     gc.collect()
 
     print(
         "[5/8] Predict "
-        "XGBoost + LightGBM + CatBoost "
-        f"features={X.shape[1]}"
+        "XGBoost(full entity) + "
+        "LightGBM/CatBoost(aux-base) "
+        f"xgb_features={X.shape[1]} "
+        f"aux_features={X_aux.shape[1]}"
     )
 
     (
@@ -701,7 +754,7 @@ def main() -> None:
 
     lgb_prediction = np.asarray(
         lgb_model.predict(
-            X,
+            X_aux,
             num_threads=6,
         ),
         dtype=np.float64,
@@ -709,7 +762,7 @@ def main() -> None:
 
     cat_prediction = np.asarray(
         cat_model.predict_proba(
-            X,
+            X_aux,
             thread_count=6,
         )[:, 1],
         dtype=np.float64,
@@ -741,7 +794,7 @@ def main() -> None:
 
         neural_arrays = (
             neural.prepare_neural_arrays(
-                X,
+                X_aux,
                 bundle[
                     "neural_preprocessor_state"
                 ],
@@ -797,7 +850,7 @@ def main() -> None:
             "[6/8] Neural models absent"
         )
 
-    del X
+    del X, X_aux
     gc.collect()
 
     print(
