@@ -39,6 +39,83 @@ class OptionalNeuralSubmissionTests(
                 )
             }
 
+            model_files = [
+                "bundle.pkl",
+            ]
+
+            if (
+                xgb_model_files
+                is None
+            ):
+                model_files.append(
+                    "xgb_model.json"
+                )
+            else:
+                model_files.extend(
+                    xgb_model_files
+                )
+
+            if (
+                "lgb"
+                in model_order
+            ):
+                model_files.append(
+                    "lgb_model.txt"
+                )
+
+            if (
+                "cat"
+                in model_order
+            ):
+                model_files.append(
+                    "cat_model.cbm"
+                )
+
+            if (
+                "resnet"
+                in model_order
+            ):
+                model_files.append(
+                    "resnet.pt"
+                )
+
+            if (
+                "ft_transformer"
+                in model_order
+            ):
+                model_files.append(
+                    "ft_transformer.pt"
+                )
+
+            if xgb_multiview:
+                model_files.extend(
+                    [
+                        "xgb_representation.json",
+                        "xgb_representative.json",
+                    ]
+                )
+
+            if xgb_temporal:
+                model_files.extend(
+                    [
+                        "xgb_recent1.json",
+                        "xgb_recent2.json",
+                    ]
+                )
+
+            if xgb_native_cat:
+                model_files.append(
+                    "xgb_native_cat.json"
+                )
+
+            manifest[
+                "model_files"
+            ] = list(
+                dict.fromkeys(
+                    model_files
+                )
+            )
+
             if (
                 xgb_model_files
                 is not None

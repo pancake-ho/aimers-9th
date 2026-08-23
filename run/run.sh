@@ -615,6 +615,8 @@ echo "[PREFLIGHT] Exercising source contracts"
         tests.test_xgb_multiview \
         tests.test_xgb_temporal \
         tests.test_dual_xgb_training_contract \
+        tests.test_privileged_trackman \
+        tests.test_submission_privileged_contract \
         -q
 )
 
@@ -1013,17 +1015,9 @@ echo "[STAGE] Working directory: $(pwd)"
 echo "[STAGE] workspace_mode=${WORK_MODE}"
 echo "[STAGE] data_dir=${AIMERS_DATA_DIR}"
 
-ENSEMBLE_POLICY="${
-    AIMERS_ENSEMBLE_POLICY:-shrinkage
-}"
-
-PRIVILEGED_DISTILL="${
-    AIMERS_PRIVILEGED_DISTILL:-1
-}"
-
-REQUIRE_QUALITY_GATE="${
-    AIMERS_REQUIRE_QUALITY_GATE:-0
-}"
+ENSEMBLE_POLICY="${AIMERS_ENSEMBLE_POLICY:-shrinkage}"
+PRIVILEGED_DISTILL="${AIMERS_PRIVILEGED_DISTILL:-1}"
+REQUIRE_QUALITY_GATE="${AIMERS_REQUIRE_QUALITY_GATE:-0}"
 
 TRAIN_ARGS=(
     "--clean"
@@ -1033,19 +1027,13 @@ TRAIN_ARGS=(
     "--ensemble-policy" "${ENSEMBLE_POLICY}"
 )
 
-if [[
-    "${PRIVILEGED_DISTILL}"
-    == "1"
-]]; then
+if [[ "${PRIVILEGED_DISTILL}" == "1" ]]; then
     TRAIN_ARGS+=(
         "--privileged-distill"
     )
 fi
 
-if [[
-    "${REQUIRE_QUALITY_GATE}"
-    == "1"
-]]; then
+if [[ "${REQUIRE_QUALITY_GATE}" == "1" ]]; then
     TRAIN_ARGS+=(
         "--require-quality-gate"
     )

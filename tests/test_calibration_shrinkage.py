@@ -101,7 +101,7 @@ class CalibrationShrinkageTests(
                     1.0,
                 ),
                 early_month_max=6,
-                maximum_2023_brier=0.30,
+                maximum_2023_regression_vs_reference=0.0,
                 minimum_calibration_transfer_gain=0.0,
             )
         )

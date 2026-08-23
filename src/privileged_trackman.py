@@ -1237,9 +1237,7 @@ def build_distillation_target(
         )
     )
 
-    result[
-        usable
-    ] = (
+    soft_target = (
         (
             1.0
             - float(strength)
@@ -1253,11 +1251,23 @@ def build_distillation_target(
         ]
     )
 
-    return np.clip(
-        result,
+    result[
+        usable
+    ] = np.clip(
+        soft_target,
         1.0e-5,
         1.0 - 1.0e-5,
     )
+
+    if not np.isfinite(
+        result
+    ).all():
+        raise ValueError(
+            "Distillation target "
+            "contains NaN or infinity."
+        )
+
+    return result
 
 
 def select_lupi_weight(

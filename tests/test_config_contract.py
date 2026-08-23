@@ -206,7 +206,7 @@ class ConfigContractTests(
             ),
         )
 
-        self.assertTrue(
+        self.assertFalse(
             config.models
             .xgb_native_cat_enabled
         )

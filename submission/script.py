@@ -514,121 +514,6 @@ def main() -> None:
         ],
     )
 
-    lupi_state = (
-        bundle.get(
-            "xgb_lupi",
-            {},
-        )
-    )
-
-    if (
-        lupi_state.get(
-            "enabled",
-            False,
-        )
-    ):
-        lupi_weight = float(
-            lupi_state.get(
-                "weight",
-                0.0,
-            )
-        )
-
-        if lupi_weight > WEIGHT_EPS:
-            lupi_filename = str(
-                lupi_state.get(
-                    "model_file"
-                )
-            )
-
-            if (
-                not lupi_filename
-                or lupi_filename
-                == "None"
-            ):
-                raise ValueError(
-                    "LUPI is enabled but "
-                    "model_file is absent."
-                )
-
-            lupi_path = (
-                MODEL_DIR
-                / lupi_filename
-            )
-
-            if not lupi_path.exists():
-                raise FileNotFoundError(
-                    lupi_path
-                )
-
-            lupi_model = (
-                xgb.Booster()
-            )
-
-            lupi_model.load_model(
-                str(
-                    lupi_path
-                )
-            )
-
-            lupi_model.set_param(
-                {
-                    "nthread": 6,
-                    "device": "cpu",
-                }
-            )
-
-            lupi_prediction = np.asarray(
-                lupi_model.predict(
-                    dtest
-                ),
-                dtype=np.float64,
-            )
-
-            if (
-                lupi_prediction.shape
-                != xgb_prediction.shape
-            ):
-                raise ValueError(
-                    "LUPI prediction "
-                    "shape mismatch."
-                )
-
-            if not np.isfinite(
-                lupi_prediction
-            ).all():
-                raise ValueError(
-                    "LUPI prediction "
-                    "contains NaN/inf."
-                )
-
-            xgb_prediction = (
-                (
-                    1.0
-                    - lupi_weight
-                )
-                * xgb_prediction
-                + lupi_weight
-                * lupi_prediction
-            )
-
-            xgb_prediction = np.clip(
-                xgb_prediction,
-                1.0e-6,
-                1.0 - 1.0e-6,
-            )
-
-            print(
-                "[XGB-LUPI] "
-                f"weight="
-                f"{lupi_weight:.3f}"
-            )
-
-            del (
-                lupi_model,
-                lupi_prediction,
-            )
-
     native_state = bundle.get(
         "xgb_native_categorical"
     )
@@ -913,6 +798,144 @@ def main() -> None:
 
         del temporal_predictions    
 
+    # --------------------------------------------------------
+    # Training-only privileged Trackman distillation student.
+    #
+    # IMPORTANT:
+    # The deployed student consumes ONLY the normal pre-pitch
+    # X matrix. No Trackman file or privileged column is read
+    # during inference.
+    #
+    # Logical-XGB order must match training:
+    #
+    # bag3
+    # -> multiview
+    # -> temporal views
+    # -> LUPI student
+    # -> native categorical expert
+    # --------------------------------------------------------
+
+    lupi_state = (
+        bundle.get(
+            "xgb_lupi",
+            {},
+        )
+    )
+
+    if (
+        lupi_state.get(
+            "enabled",
+            False,
+        )
+    ):
+        lupi_weight = float(
+            lupi_state.get(
+                "weight",
+                0.0,
+            )
+        )
+
+        if lupi_weight > WEIGHT_EPS:
+            lupi_filename = (
+                lupi_state.get(
+                    "model_file"
+                )
+            )
+
+            if not lupi_filename:
+                raise ValueError(
+                    "LUPI is enabled but "
+                    "model_file is absent."
+                )
+
+            lupi_filename = str(
+                lupi_filename
+            )
+
+            lupi_path = (
+                MODEL_DIR
+                / lupi_filename
+            )
+
+            if not lupi_path.exists():
+                raise FileNotFoundError(
+                    lupi_path
+                )
+
+            lupi_model = (
+                xgb.Booster()
+            )
+
+            lupi_model.load_model(
+                str(
+                    lupi_path
+                )
+            )
+
+            lupi_model.set_param(
+                {
+                    "nthread": 6,
+                    "device": "cpu",
+                }
+            )
+
+            lupi_prediction = (
+                np.asarray(
+                    lupi_model.predict(
+                        dtest
+                    ),
+                    dtype=np.float64,
+                )
+            )
+
+            if (
+                lupi_prediction.shape
+                != xgb_prediction.shape
+            ):
+                raise ValueError(
+                    "LUPI prediction "
+                    "shape mismatch: "
+                    f"student="
+                    f"{lupi_prediction.shape} "
+                    f"base="
+                    f"{xgb_prediction.shape}"
+                )
+
+            if not np.isfinite(
+                lupi_prediction
+            ).all():
+                raise ValueError(
+                    "LUPI prediction "
+                    "contains NaN or infinity."
+                )
+
+            xgb_prediction = (
+                (
+                    1.0
+                    - lupi_weight
+                )
+                * xgb_prediction
+                + lupi_weight
+                * lupi_prediction
+            )
+
+            xgb_prediction = np.clip(
+                xgb_prediction,
+                1.0e-6,
+                1.0 - 1.0e-6,
+            )
+
+            print(
+                "[XGB-LUPI] "
+                f"weight="
+                f"{lupi_weight:.3f}"
+            )
+
+            del (
+                lupi_model,
+                lupi_prediction,
+            )
+            
     if (
         native_state
         and X_native is not None

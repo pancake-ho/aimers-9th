@@ -81,6 +81,43 @@ def _required_files() -> dict[
             handle
         )
 
+    model_order = list(
+        manifest.get(
+            "model_order",
+            (),
+        )
+    )
+
+    supported_orders = [
+        [
+            "xgb",
+            "lgb",
+            "cat",
+        ],
+        [
+            "xgb",
+            "lgb",
+            "cat",
+            "resnet",
+        ],
+        [
+            "xgb",
+            "lgb",
+            "cat",
+            "resnet",
+            "ft_transformer",
+        ],
+    ]
+
+    if (
+        model_order
+        not in supported_orders
+    ):
+        raise ValueError(
+            "Unsupported manifest model_order: "
+            f"{model_order}"
+        )
+
     model_files = list(
         manifest.get(
             "model_files",
