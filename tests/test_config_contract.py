@@ -206,6 +206,41 @@ class ConfigContractTests(
             ),
         )
 
+        self.assertTrue(
+            config.models
+            .xgb_native_cat_enabled
+        )
+
+        self.assertEqual(
+            config.models
+            .xgb_native_cat_seed,
+            7026,
+        )
+
+        self.assertEqual(
+            config.models
+            .xgb_native_cat_grid_step,
+            0.025,
+        )
+
+        self.assertEqual(
+            config.models
+            .xgb_native_cat_max_weight,
+            0.20,
+        )
+
+        self.assertEqual(
+            config.models
+            .xgb_native_cat_min_material_protected_gain,
+            2.0e-5,
+        )
+
+        self.assertEqual(
+            config.models
+            .xgb_native_cat_min_forward_improvement,
+            1.0e-5,
+        )
+
         self.assertAlmostEqual(
             sum(
                 config

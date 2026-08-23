@@ -216,6 +216,47 @@ def _required_files() -> dict[str, Path]:
                 / filename
             )
 
+    xgb_native_cat = (
+        manifest.get(
+            "xgb_native_categorical"
+        )
+    )
+
+    if (
+        xgb_native_cat
+        and xgb_native_cat.get(
+            "enabled",
+            False,
+        )
+    ):
+        filename = str(
+            xgb_native_cat[
+                "model_file"
+            ]
+        )
+
+        path_name = Path(
+            filename
+        )
+
+        if (
+            path_name.name
+            != filename
+            or path_name.suffix
+            != ".json"
+        ):
+            raise ValueError(
+                "Invalid native categorical "
+                f"XGB artifact: {filename}"
+            )
+
+        files[
+            f"model/{filename}"
+        ] = (
+            MODEL_DIR
+            / filename
+        )
+
     xgb_model_files = list(
         xgb_bagging.get(
             "model_files",

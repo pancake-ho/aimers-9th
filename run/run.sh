@@ -4,7 +4,7 @@
 #SBATCH --cpus-per-gpu=16
 #SBATCH --mem-per-gpu=29G
 #SBATCH -p batch_eebme_ugrad
-#SBATCH --exclude=moana-y5
+#SBATCH --exclude=moana-y4,moana-y5
 #SBATCH -t 1-0
 #SBATCH -o /data/surt321/repos/aimers_9th/logs/slurm-%A.out
 

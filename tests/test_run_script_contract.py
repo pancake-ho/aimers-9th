@@ -260,8 +260,33 @@ class RunScriptContractTests(
         # This test protects execution semantics only.
         # Strategy/version naming is checked separately.
         self.assertIn(
-            "--exclude=moana-y5",
+            "#SBATCH --exclude=",
             script,
+        )
+
+        exclude_line = next(
+            line
+            for line in script.splitlines()
+            if line.startswith("#SBATCH --exclude=")
+        )
+
+        excluded_nodes = {
+            node.strip()
+            for node in (
+                exclude_line
+                .split("=", 1)[1]
+                .split(",")
+            )
+        }
+
+        self.assertIn(
+            "moana-y4",
+            excluded_nodes,
+        )
+
+        self.assertIn(
+            "moana-y5",
+            excluded_nodes,
         )
 
         # Validation diagnostics must survive

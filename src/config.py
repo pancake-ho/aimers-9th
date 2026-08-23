@@ -248,6 +248,46 @@ class ModelConfig:
     xgb_temporal_protected_tolerance: float = (
         0.0
     )
+
+    # --------------------------------------------------------
+    # V15 native-categorical XGBoost expert.
+    #
+    # The existing XGB path receives ordinal-coded categorical
+    # columns. This auxiliary expert uses the same engineered
+    # official-data features but tells XGBoost which columns are
+    # genuinely categorical.
+    #
+    # It never replaces the champion XGB. The selected expert
+    # weight is capped so V13 remains the stable anchor.
+    # --------------------------------------------------------
+
+    xgb_native_cat_enabled: bool = True
+
+    xgb_native_cat_seed: int = 7026
+
+    xgb_native_cat_max_cat_to_onehot: int = 16
+
+    xgb_native_cat_max_cat_threshold: int = 64
+
+    xgb_native_cat_grid_step: float = 0.025
+
+    xgb_native_cat_max_weight: float = 0.20
+
+    # A non-zero candidate must improve BOTH closest forward
+    # regimes. Tiny validation noise is not enough.
+    xgb_native_cat_min_material_protected_gain: float = (
+        2.0e-5
+    )
+
+    xgb_native_cat_min_forward_improvement: float = (
+        1.0e-5
+    )
+
+    # 2023 predates the ABS regime, so a small regression is
+    # tolerated but bounded.
+    xgb_native_cat_max_2023_regression: float = (
+        5.0e-5
+    )
     
     # ------------------------------------------------------------
     # XGBoost

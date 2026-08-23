@@ -1,0 +1,49 @@
+==================================================
+HOST=moana-u1
+CUDA_VISIBLE_DEVICES=0
+==================================================
+
+===== NVIDIA =====
+Sun Aug 23 22:12:43 2026       
++---------------------------------------------------------------------------------------+
+| NVIDIA-SMI 535.216.03             Driver Version: 535.216.03   CUDA Version: 12.2     |
+|-----------------------------------------+----------------------+----------------------+
+| GPU  Name                 Persistence-M | Bus-Id        Disp.A | Volatile Uncorr. ECC |
+| Fan  Temp   Perf          Pwr:Usage/Cap |         Memory-Usage | GPU-Util  Compute M. |
+|                                         |                      |               MIG M. |
+|=========================================+======================+======================|
+|   0  NVIDIA RTX A2000               On  | 00000000:52:00.0 Off |                  Off |
+| 30%   28C    P8              12W /  70W |      1MiB /  6138MiB |      0%      Default |
+|                                         |                      |                  N/A |
++-----------------------------------------+----------------------+----------------------+
+                                                                                         
++---------------------------------------------------------------------------------------+
+| Processes:                                                                            |
+|  GPU   GI   CI        PID   Type   Process name                            GPU Memory |
+|        ID   ID                                                             Usage      |
+|=======================================================================================|
+|  No running processes found                                                           |
++---------------------------------------------------------------------------------------+
+
+===== BEFORE =====
+LD_LIBRARY_PATH=/usr/local/cuda/lib
+	libcuda.so.1 (libc6,x86-64) => /lib/x86_64-linux-gnu/libcuda.so.1
+	libcuda.so (libc6,x86-64) => /lib/x86_64-linux-gnu/libcuda.so
+/data/surt321/anaconda3/envs/aimers/lib/python3.10/site-packages/torch/cuda/__init__.py:61: FutureWarning: The pynvml package is deprecated. Please install nvidia-ml-py instead. If you did not install pynvml directly, please report this to the maintainers of the package that installed pynvml for you.
+  import pynvml  # type: ignore[import]
+torch = 2.6.0+cu118
+torch CUDA = 11.8
+torch available before = True
+cuInit before = 0
+
+===== AFTER unset LD_LIBRARY_PATH =====
+LD_LIBRARY_PATH=<unset>
+/data/surt321/anaconda3/envs/aimers/lib/python3.10/site-packages/torch/cuda/__init__.py:61: FutureWarning: The pynvml package is deprecated. Please install nvidia-ml-py instead. If you did not install pynvml directly, please report this to the maintainers of the package that installed pynvml for you.
+  import pynvml  # type: ignore[import]
+cuInit after = 0
+torch available after = True
+device count = 1
+GPU = NVIDIA RTX A2000
+CUDA COMPUTE PASS -0.021340973675251007
+
+===== PASS =====

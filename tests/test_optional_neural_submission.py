@@ -20,6 +20,7 @@ class OptionalNeuralSubmissionTests(
         *,
         xgb_multiview: bool = False,
         xgb_temporal: bool = False,
+        xgb_native_cat: bool = False,        
     ) -> dict[str, Path]:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(
@@ -88,6 +89,18 @@ class OptionalNeuralSubmissionTests(
                     "representation_raw_feature_count": 92,
 
                     "pca_component_count": 8,
+                }
+
+            if xgb_native_cat:
+                manifest[
+                    "xgb_native_categorical"
+                ] = {
+                    "enabled": True,
+                    "weight": 0.10,
+                    "model_file": (
+                        "xgb_native_cat.json"
+                    ),
+                    "feature_count": 269,
                 }
             
             if xgb_temporal:
@@ -351,6 +364,30 @@ class OptionalNeuralSubmissionTests(
                     "ft_transformer",
                 ]
             )
+
+    def test_native_categorical_xgb_is_packaged(
+        self,
+    ) -> None:
+        files = self._required_files_for(
+            [
+                "xgb",
+                "lgb",
+                "cat",
+                "resnet",
+                "ft_transformer",
+            ],
+            xgb_model_files=[
+                "xgb_model.json",
+                "xgb_model_seed2027.json",
+                "xgb_model_seed2028.json",
+            ],
+            xgb_native_cat=True,
+        )
+
+        self.assertIn(
+            "model/xgb_native_cat.json",
+            files,
+        )
 
 
 if __name__ == "__main__":

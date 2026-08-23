@@ -159,6 +159,64 @@ def _quantile_dmatrix(
     )
 
 
+def _native_categorical_quantile_dmatrix(
+    X: pd.DataFrame,
+    config: ModelConfig,
+    *,
+    label=None,
+    weight=None,
+    ref=None,
+):
+    if xgb is None:
+        raise ImportError(
+            "xgboost is required."
+        )
+
+    return xgb.QuantileDMatrix(
+        X,
+        label=label,
+        weight=weight,
+        feature_names=list(
+            X.columns
+        ),
+        ref=ref,
+        max_bin=int(
+            config.xgb_max_bin
+        ),
+        nthread=int(
+            config.num_threads
+        ),
+        enable_categorical=True,
+    )
+
+
+def _xgb_native_cat_params(
+    config: ModelConfig,
+) -> dict:
+    params = _xgb_params(
+        config,
+        seed=int(
+            config
+            .xgb_native_cat_seed
+        ),
+    )
+
+    params.update(
+        {
+            "max_cat_to_onehot": int(
+                config
+                .xgb_native_cat_max_cat_to_onehot
+            ),
+            "max_cat_threshold": int(
+                config
+                .xgb_native_cat_max_cat_threshold
+            ),
+        }
+    )
+
+    return params
+
+
 def select_xgb_gain_features(
     model,
     feature_names: Sequence[str],
@@ -280,6 +338,277 @@ def validate_xgboost_backend(config: ModelConfig) -> None:
 
     del model, dprobe, X_probe, y_probe, pred
     gc.collect()
+
+    if (
+        config
+        .xgb_native_cat_enabled
+    ):
+        native_dtype = (
+            pd.CategoricalDtype(
+                categories=[
+                    "a",
+                    "b",
+                    "c",
+                    "__AIMERS_XGB_UNKNOWN__",
+                ],
+                ordered=False,
+            )
+        )
+
+        X_native_probe = pd.DataFrame(
+            {
+                "probe_cat": pd.Series(
+                    pd.Categorical(
+                        [
+                            "a",
+                            "a",
+                            "b",
+                            "b",
+                            "c",
+                            "c",
+                            "a",
+                            "b",
+                        ],
+                        dtype=native_dtype,
+                    )
+                ),
+                "probe_num": np.asarray(
+                    [
+                        0.0,
+                        1.0,
+                        0.0,
+                        1.0,
+                        0.0,
+                        1.0,
+                        2.0,
+                        2.0,
+                    ],
+                    dtype=np.float32,
+                ),
+            }
+        )
+
+        y_native_probe = np.asarray(
+            [
+                0,
+                0,
+                0,
+                1,
+                0,
+                1,
+                1,
+                1,
+            ],
+            dtype=np.float32,
+        )
+
+        d_native_probe = (
+            _native_categorical_quantile_dmatrix(
+                X_native_probe,
+                config,
+                label=(
+                    y_native_probe
+                ),
+            )
+        )
+
+        native_params = (
+            _xgb_native_cat_params(
+                config
+            )
+        )
+
+        native_params.update(
+            {
+                "verbosity": 0,
+                "min_child_weight": 1.0,
+            }
+        )
+
+        native_model = xgb.train(
+            params=native_params,
+            dtrain=d_native_probe,
+            num_boost_round=2,
+        )
+
+        native_prediction = (
+            np.asarray(
+                native_model.predict(
+                    d_native_probe
+                ),
+                dtype=np.float64,
+            )
+        )
+
+        if (
+            native_prediction.shape
+            != y_native_probe.shape
+            or not np.isfinite(
+                native_prediction
+            ).all()
+        ):
+            raise RuntimeError(
+                "Native categorical "
+                "XGBoost backend probe "
+                "failed."
+            )
+
+        print(
+            "[BACKEND] Native categorical "
+            "XGBoost PASS "
+            f"(device={config.xgb_device})"
+        )
+
+        del (
+            native_model,
+            d_native_probe,
+            X_native_probe,
+            y_native_probe,
+            native_prediction,
+        )
+
+        gc.collect()
+
+
+def train_xgboost_native_cat_fold(
+    X_train: pd.DataFrame,
+    y_train: np.ndarray,
+    X_valid: pd.DataFrame,
+    y_valid: np.ndarray,
+    sample_weight: np.ndarray,
+    config: ModelConfig,
+):
+    dtrain = (
+        _native_categorical_quantile_dmatrix(
+            X_train,
+            config,
+            label=y_train,
+            weight=sample_weight,
+        )
+    )
+
+    dvalid = (
+        _native_categorical_quantile_dmatrix(
+            X_valid,
+            config,
+            label=y_valid,
+            ref=dtrain,
+        )
+    )
+
+    model = xgb.train(
+        params=(
+            _xgb_native_cat_params(
+                config
+            )
+        ),
+        dtrain=dtrain,
+        num_boost_round=(
+            config
+            .xgb_num_boost_round
+        ),
+        evals=[
+            (
+                dvalid,
+                "valid",
+            ),
+        ],
+        custom_metric=(
+            _xgb_brier_metric
+        ),
+        maximize=False,
+        early_stopping_rounds=(
+            config
+            .xgb_early_stopping_rounds
+        ),
+        verbose_eval=50,
+    )
+
+    best_iteration = (
+        int(
+            model.best_iteration
+        )
+        if model.best_iteration
+        is not None
+        else (
+            config
+            .xgb_num_boost_round
+            - 1
+        )
+    )
+
+    rounds = int(
+        best_iteration + 1
+    )
+
+    prediction = np.asarray(
+        model.predict(
+            dvalid,
+            iteration_range=(
+                0,
+                rounds,
+            ),
+        ),
+        dtype=np.float64,
+    )
+
+    if not np.isfinite(
+        prediction
+    ).all():
+        raise RuntimeError(
+            "Native categorical XGB "
+            "produced non-finite "
+            "predictions."
+        )
+
+    del (
+        dtrain,
+        dvalid,
+    )
+
+    gc.collect()
+
+    return (
+        model,
+        prediction,
+        rounds,
+    )
+
+
+def train_xgboost_native_cat_full(
+    X_train: pd.DataFrame,
+    y_train: np.ndarray,
+    sample_weight: np.ndarray,
+    config: ModelConfig,
+    *,
+    num_boost_round: int,
+):
+    dtrain = (
+        _native_categorical_quantile_dmatrix(
+            X_train,
+            config,
+            label=y_train,
+            weight=sample_weight,
+        )
+    )
+
+    model = xgb.train(
+        params=(
+            _xgb_native_cat_params(
+                config
+            )
+        ),
+        dtrain=dtrain,
+        num_boost_round=int(
+            num_boost_round
+        ),
+        verbose_eval=False,
+    )
+
+    del dtrain
+    gc.collect()
+
+    return model
 
 
 def train_xgboost_fold(

@@ -452,59 +452,48 @@ def main() -> None:
 
     X = runtime.preprocess_frame(
         features,
-        bundle["preprocessor_state"],
-    )
-    auxiliary_feature_names = list(
-        bundle.get(
-            "auxiliary_feature_names",
-            list(X.columns),
-        )
+        bundle[
+            "preprocessor_state"
+        ],
     )
 
-    if not auxiliary_feature_names:
-        raise ValueError(
-            "Auxiliary feature view is empty."
-        )
+    native_state = bundle.get(
+        "xgb_native_categorical"
+    )
 
-    if len(auxiliary_feature_names) != len(
-        set(auxiliary_feature_names)
+    X_native = None
+
+    if (
+        native_state
+        and native_state.get(
+            "enabled",
+            False,
+        )
+        and float(
+            native_state.get(
+                "weight",
+                0.0,
+            )
+        )
+        > 0.0
     ):
-        raise ValueError(
-            "Duplicate auxiliary feature names "
-            "in bundle."
+        X_native = (
+            runtime
+            .preprocess_xgb_native_frame(
+                features,
+                bundle[
+                    "preprocessor_state"
+                ],
+            )
         )
 
-    missing_auxiliary_features = [
-        name
-        for name in auxiliary_feature_names
-        if name not in X.columns
-    ]
-
-    if missing_auxiliary_features:
-        raise ValueError(
-            "Auxiliary feature view is missing "
-            "runtime columns: "
-            f"{missing_auxiliary_features[:20]}"
+        print(
+            "[XGB-NATIVE-CAT] "
+            f"prepared_features="
+            f"{X_native.shape[1]} "
+            f"weight="
+            f"{float(native_state['weight']):.3f}"
         )
-
-    X_aux = X.loc[
-        :,
-        auxiliary_feature_names,
-    ]
-
-    routing = bundle.get(
-        "feature_routing",
-        {},
-    )
-
-    print(
-        "[FEATURE-ROUTING] "
-        f"policy="
-        f"{routing.get('policy', 'legacy_all_features')} "
-        f"xgb_features={X.shape[1]} "
-        f"aux_features={X_aux.shape[1]}"
-    )    
-    
 
     del features
     gc.collect()
@@ -514,7 +503,6 @@ def main() -> None:
         "XGBoost(full entity) + "
         "LightGBM/CatBoost(aux-base) "
         f"xgb_features={X.shape[1]} "
-        f"aux_features={X_aux.shape[1]}"
     )
 
     (
@@ -750,11 +738,114 @@ def main() -> None:
             f"{temporal_state['weights']}"
         )
 
-        del temporal_predictions        
+        del temporal_predictions    
+
+    if (
+        native_state
+        and X_native is not None
+    ):
+        native_weight = float(
+            native_state[
+                "weight"
+            ]
+        )
+
+        native_filename = str(
+            native_state[
+                "model_file"
+            ]
+        )
+
+        native_path = (
+            MODEL_DIR
+            / native_filename
+        )
+
+        if not native_path.exists():
+            raise FileNotFoundError(
+                native_path
+            )
+
+        native_model = xgb.Booster()
+
+        native_model.load_model(
+            str(
+                native_path
+            )
+        )
+
+        native_model.set_param(
+            {
+                "nthread": 6,
+                "device": "cpu",
+            }
+        )
+
+        d_native = xgb.DMatrix(
+            X_native,
+            feature_names=list(
+                X_native.columns
+            ),
+            enable_categorical=True,
+        )
+
+        native_prediction = (
+            np.asarray(
+                native_model.predict(
+                    d_native
+                ),
+                dtype=np.float64,
+            )
+        )
+
+        if (
+            native_prediction.shape
+            != xgb_prediction.shape
+        ):
+            raise ValueError(
+                "Native categorical XGB "
+                "prediction shape mismatch."
+            )
+
+        if not np.isfinite(
+            native_prediction
+        ).all():
+            raise ValueError(
+                "Native categorical XGB "
+                "prediction is non-finite."
+            )
+
+        xgb_prediction = (
+            (
+                1.0
+                - native_weight
+            )
+            * xgb_prediction
+            + native_weight
+            * native_prediction
+        )
+
+        xgb_prediction = np.clip(
+            xgb_prediction,
+            1.0e-6,
+            1.0 - 1.0e-6,
+        )
+
+        print(
+            "[XGB-NATIVE-CAT] "
+            f"weight={native_weight:.3f}"
+        )
+
+        del (
+            native_model,
+            native_prediction,
+            d_native,
+            X_native,
+        )
 
     lgb_prediction = np.asarray(
         lgb_model.predict(
-            X_aux,
+            X,
             num_threads=6,
         ),
         dtype=np.float64,
@@ -762,7 +853,7 @@ def main() -> None:
 
     cat_prediction = np.asarray(
         cat_model.predict_proba(
-            X_aux,
+            X,
             thread_count=6,
         )[:, 1],
         dtype=np.float64,
@@ -794,7 +885,7 @@ def main() -> None:
 
         neural_arrays = (
             neural.prepare_neural_arrays(
-                X_aux,
+                X,
                 bundle[
                     "neural_preprocessor_state"
                 ],
@@ -850,7 +941,7 @@ def main() -> None:
             "[6/8] Neural models absent"
         )
 
-    del X, X_aux
+    del X
     gc.collect()
 
     print(

@@ -32,6 +32,8 @@ from src.models import (
     train_xgboost_multiview_full,
     train_xgboost_temporal_fold,
     train_xgboost_temporal_full,    
+    train_xgboost_native_cat_fold,
+    train_xgboost_native_cat_full,    
 )
 from src.xgb_multiview import (
     blend_xgb_views,
@@ -43,7 +45,15 @@ from src.xgb_temporal import (
     select_temporal_view_weights,
 )
 from src.preprocessing import TabularPreprocessor
-from src.runtime import apply_logit_intercept, blend_predictions
+from src.runtime import (
+    apply_logit_intercept,
+    blend_predictions,
+    preprocess_xgb_native_frame,
+)
+from src.xgb_native_cat import (
+    blend_xgb_native_cat,
+    select_xgb_native_cat_weight,
+)
 from src.splits import make_abs_late_fold, make_temporal_folds, uniform_weights
 
 
@@ -67,12 +77,17 @@ def _active_neural_models(config: ExperimentConfig) -> tuple[str, ...]:
 def _strategy_name(
     model_order: tuple[str, ...],
 ) -> str:
+    suffix = (
+        "entityv2_nativecat_"
+        "timeviews_bag3_recent1_recent2_"
+        "fixedchamp_calibrated_v15"
+    )
+
     if model_order == GBDT_MODEL_ORDER:
         return (
-            "temporal_xgb_entityv2_"
-            "timeviews_bag3_recent1_recent2_"
-            "lgb_cat_auxbase_"
-            "fixedchamp_calibrated_v14"
+            "temporal_xgb_"
+            + suffix
+            + "_lgb_cat"
         )
 
     if model_order == (
@@ -80,10 +95,9 @@ def _strategy_name(
         "resnet",
     ):
         return (
-            "temporal_xgb_entityv2_"
-            "timeviews_bag3_recent1_recent2_"
-            "lgb_cat_resnet_auxbase_"
-            "fixedchamp_calibrated_v14"
+            "temporal_xgb_"
+            + suffix
+            + "_lgb_cat_resnet"
         )
 
     if model_order == (
@@ -92,10 +106,9 @@ def _strategy_name(
         "ft_transformer",
     ):
         return (
-            "temporal_xgb_entityv2_"
-            "timeviews_bag3_recent1_recent2_"
-            "lgb_cat_resnet_ftt_auxbase_"
-            "fixedchamp_calibrated_v14"
+            "temporal_xgb_"
+            + suffix
+            + "_lgb_cat_resnet_ftt"
         )
 
     raise ValueError(
@@ -815,79 +828,92 @@ def run_temporal_validation(
 
         gc.collect()
 
-        # --------------------------------------------------------
-        # V14 model-specific feature routing.
-        #
-        # XGBoost keeps the complete 269-feature table, including the
-        # validated pitcher-level Trackman entity family.
-        #
-        # Auxiliary models retain the pre-entity champion feature space.
-        # This isolates the entity experiment to logical XGBoost instead of
-        # silently changing every model behind frozen champion weights.
-        # --------------------------------------------------------
-
-        if entity_gate_required:
-            (
-                X_train_aux,
-                aux_entity_columns,
-            ) = _split_entity_feature_view(
-                X_train
-            )
-
-            X_valid_aux = X_valid.drop(
-                columns=aux_entity_columns
-            )
-        else:
-            X_train_aux = X_train
-            X_valid_aux = X_valid
-            aux_entity_columns = []
-
-        aux_cat_cols = [
-            column
-            for column in preprocessor.cat_cols_
-            if column in X_train_aux.columns
-        ]
-
-        aux_num_cols = [
-            column
-            for column in preprocessor.num_cols_
-            if column in X_train_aux.columns
-        ]
-
-        aux_categorical_indices = [
-            int(
-                X_train_aux.columns.get_loc(
-                    column
-                )
-            )
-            for column in aux_cat_cols
-        ]
+        native_cat_prediction = None
+        native_cat_metrics = None
 
         if (
-            entity_gate_required
-            and len(aux_entity_columns) == 0
+            config.models
+            .xgb_native_cat_enabled
         ):
-            raise RuntimeError(
-                "Entity routing is enabled but "
-                "no tm_entity_* columns were removed."
+            native_state = (
+                preprocessor
+                .export_state()
             )
 
-        if not X_train_aux.columns.equals(
-            X_valid_aux.columns
-        ):
-            raise RuntimeError(
-                "Auxiliary train/valid feature "
-                "columns do not match."
+            X_train_native = (
+                preprocess_xgb_native_frame(
+                    features.iloc[
+                        fold.train_idx
+                    ],
+                    native_state,
+                )
             )
 
-        print(
-            "[FEATURE-ROUTING] "
-            f"fold={fold.validation_label} "
-            f"xgb_features={X_train.shape[1]} "
-            f"aux_features={X_train_aux.shape[1]} "
-            f"entity_only_features="
-            f"{len(aux_entity_columns)}"
-        )        
+            X_valid_native = (
+                preprocess_xgb_native_frame(
+                    features.iloc[
+                        fold.valid_idx
+                    ],
+                    native_state,
+                )
+            )
+
+            start = time.perf_counter()
+
+            (
+                native_cat_model,
+                native_cat_prediction,
+                native_cat_rounds,
+            ) = (
+                train_xgboost_native_cat_fold(
+                    X_train_native,
+                    y_train,
+                    X_valid_native,
+                    y_valid,
+                    sample_weight,
+                    config.models,
+                )
+            )
+
+            elapsed = (
+                time.perf_counter()
+                - start
+            )
+
+            native_cat_metrics = (
+                evaluate_probabilities(
+                    y_valid,
+                    native_cat_prediction,
+                )
+            )
+
+            native_cat_metrics[
+                "train_seconds"
+            ] = float(
+                elapsed
+            )
+
+            best_iterations[
+                "xgb_native_cat"
+            ] = int(
+                native_cat_rounds
+            )
+
+            _print_metrics(
+                (
+                    f"{fold.validation_label}"
+                    "/xgb_native_cat"
+                ),
+                native_cat_metrics,
+            )
+
+            del (
+                native_cat_model,
+                X_train_native,
+                X_valid_native,
+            )
+
+            gc.collect()
 
         # --------------------------------------------------------
         # LightGBM
@@ -899,12 +925,12 @@ def run_temporal_validation(
             predictions["lgb"],
             best_iterations["lgb"],
         ) = train_lightgbm_fold(
-            X_train_aux,
+            X_train,
             y_train,
-            X_valid_aux,
+            X_valid,
             y_valid,
             sample_weight,
-            aux_categorical_indices,
+            preprocessor.categorical_indices,
             config.models,
         )
 
@@ -932,16 +958,18 @@ def run_temporal_validation(
         gc.collect()
 
         start = time.perf_counter()
-        cat_model, predictions["cat"], best_iterations["cat"] = (
-            train_catboost_fold(
-                X_train_aux,
-                y_train,
-                X_valid_aux,
-                y_valid,
-                sample_weight,
-                aux_categorical_indices,
-                config.models,
-            )
+        (
+            cat_model,
+            predictions["cat"],
+            best_iterations["cat"],
+        ) = train_catboost_fold(
+            X_train,
+            y_train,
+            X_valid,
+            y_valid,
+            sample_weight,
+            preprocessor.categorical_indices,
+            config.models,
         )
         elapsed = time.perf_counter() - start
         per_model_metrics["cat"] = evaluate_probabilities(y_valid, predictions["cat"])
@@ -958,23 +986,37 @@ def run_temporal_validation(
                 train_neural_fold,
             )
 
-            neural_preprocessor = NeuralPreprocessor(
-                categorical_cols=aux_cat_cols,
-                numerical_cols=aux_num_cols,
-            ).fit(X_train_aux)
+            neural_preprocessor = (
+                NeuralPreprocessor(
+                    categorical_cols=(
+                        preprocessor.cat_cols_
+                    ),
+                    numerical_cols=(
+                        preprocessor.num_cols_
+                    ),
+                )
+                .fit(
+                    X_train
+                )
+            )
 
             neural_state = (
-                neural_preprocessor.export_state()
+                neural_preprocessor
+                .export_state()
             )
 
-            train_arrays = prepare_neural_arrays(
-                X_train_aux,
-                neural_state,
+            train_arrays = (
+                prepare_neural_arrays(
+                    X_train,
+                    neural_state,
+                )
             )
 
-            valid_arrays = prepare_neural_arrays(
-                X_valid_aux,
-                neural_state,
+            valid_arrays = (
+                prepare_neural_arrays(
+                    X_valid,
+                    neural_state,
+                )
             )
 
             for offset, kind in enumerate(neural_model_order, start=1):
@@ -1004,8 +1046,6 @@ def run_temporal_validation(
         del (
             X_train,
             X_valid,
-            X_train_aux,
-            X_valid_aux,
             sample_weight,
         )
         gc.collect()
@@ -1084,21 +1124,13 @@ def run_temporal_validation(
                         temporal_view_metrics
                     ),
                 },
+                "xgb_native_cat_prediction": (
+                    native_cat_prediction
+                ),
 
-                "feature_routing": {
-                    "xgb_feature_count": int(
-                        len(
-                            preprocessor.feature_names_
-                        )
-                    ),
-                    "auxiliary_feature_count": int(
-                        len(aux_cat_cols)
-                        + len(aux_num_cols)
-                    ),
-                    "entity_only_feature_count": int(
-                        len(aux_entity_columns)
-                    ),
-                },                
+                "xgb_native_cat_metrics": (
+                    native_cat_metrics
+                ),                              
             }
         )
 
@@ -1248,6 +1280,108 @@ def run_temporal_validation(
             ),
             temporal_metrics,
         )
+
+    native_cat_weight = 0.0
+
+    native_cat_report = {
+        "method": (
+            "native_categorical_disabled"
+        ),
+        "selected_weight": 0.0,
+        "accepted_nonzero": False,
+    }
+
+    if (
+        config.models
+        .xgb_native_cat_enabled
+    ):
+        (
+            native_cat_weight,
+            native_cat_report,
+        ) = (
+            select_xgb_native_cat_weight(
+                fold_results,
+                fold_importance=(
+                    config
+                    .temporal_fold_importance
+                ),
+                grid_step=(
+                    config.models
+                    .xgb_native_cat_grid_step
+                ),
+                maximum_weight=(
+                    config.models
+                    .xgb_native_cat_max_weight
+                ),
+                minimum_material_protected_gain=(
+                    config.models
+                    .xgb_native_cat_min_material_protected_gain
+                ),
+                minimum_forward_improvement=(
+                    config.models
+                    .xgb_native_cat_min_forward_improvement
+                ),
+                maximum_2023_regression=(
+                    config.models
+                    .xgb_native_cat_max_2023_regression
+                ),
+            )
+        )
+
+        print(
+            "[XGB-NATIVE-CAT-SELECT] "
+            f"weight={native_cat_weight:.3f} "
+            f"forward_gain="
+            f"{native_cat_report['forward_improvement']:+.8f} "
+            f"gains="
+            f"{native_cat_report['gain_vs_base']}"
+        )
+
+        for fold in fold_results:
+            upgraded = (
+                blend_xgb_native_cat(
+                    fold[
+                        "predictions"
+                    ][
+                        "xgb"
+                    ],
+                    fold[
+                        "xgb_native_cat_prediction"
+                    ],
+                    native_cat_weight,
+                )
+            )
+
+            fold[
+                "predictions"
+            ][
+                "xgb"
+            ] = upgraded
+
+            fold[
+                "metrics"
+            ][
+                "xgb"
+            ] = (
+                evaluate_probabilities(
+                    fold[
+                        "y_true"
+                    ],
+                    upgraded,
+                )
+            )
+
+            _print_metrics(
+                (
+                    f"{fold['validation_label']}"
+                    "/xgb_native_cat_blend"
+                ),
+                fold[
+                    "metrics"
+                ][
+                    "xgb"
+                ],
+            )
 
     (
         weights,
@@ -1435,6 +1569,29 @@ def run_temporal_validation(
             ),
         )
     )
+
+    if (
+        config.models
+        .xgb_native_cat_enabled
+    ):
+        final_iterations[
+            "xgb_native_cat"
+        ] = int(
+            min(
+                config.models
+                .xgb_num_boost_round,
+                max(
+                    50,
+                    round(
+                        recent_iterations[
+                            "xgb_native_cat"
+                        ]
+                        * 1.05
+                    ),
+                ),
+            )
+        )
+
     neural_epoch_caps = {
         "resnet": int(config.neural.resnet_max_epochs),
         "ft_transformer": int(config.neural.ft_max_epochs),
@@ -1491,7 +1648,19 @@ def run_temporal_validation(
             "validation": (
                 temporal_report
             ),
-        },        
+        },      
+        "xgb_native_categorical": {
+            "enabled": bool(
+                config.models
+                .xgb_native_cat_enabled
+            ),
+            "weight": float(
+                native_cat_weight
+            ),
+            "validation": (
+                native_cat_report
+            ),
+        },          
     }
     report = {
         "strategy": _strategy_name(model_order),
@@ -1505,6 +1674,9 @@ def run_temporal_validation(
         ),
         "xgb_temporal_views": (
             temporal_report
+        ),        
+        "xgb_native_categorical": (
+            native_cat_report
         ),        
     }
     by_label = {
@@ -2366,77 +2538,68 @@ def train_and_save_final_models(
 
     gc.collect()
 
-    # --------------------------------------------------------
-    # V14 auxiliary champion feature view.
-    #
-    # XGB models above intentionally keep Trackman entity v2.
-    # LGB/Cat/neural below use the original non-entity feature space.
-    # --------------------------------------------------------
-
-    entity_routing_enabled = bool(
-        config.use_trackman
-        and config.features.trackman_entity_enabled
-    )
-
-    if entity_routing_enabled:
-        (
-            X_aux,
-            aux_entity_columns,
-        ) = _split_entity_feature_view(
-            X
-        )
-    else:
-        X_aux = X
-        aux_entity_columns = []
-
-    auxiliary_feature_names = list(
-        X_aux.columns
-    )
-
-    aux_cat_cols = [
-        column
-        for column in preprocessor.cat_cols_
-        if column in X_aux.columns
-    ]
-
-    aux_num_cols = [
-        column
-        for column in preprocessor.num_cols_
-        if column in X_aux.columns
-    ]
-
-    aux_categorical_indices = [
-        int(
-            X_aux.columns.get_loc(
-                column
-            )
-        )
-        for column in aux_cat_cols
-    ]
+    native_cat_path = None
 
     if (
-        entity_routing_enabled
-        and not aux_entity_columns
+        config.models
+        .xgb_native_cat_enabled
     ):
-        raise RuntimeError(
-            "Final entity routing removed no "
-            "tm_entity_* features."
+        print(
+            "[FINAL] Building native "
+            "categorical XGBoost frame..."
         )
 
-    if len(auxiliary_feature_names) != len(
-        set(auxiliary_feature_names)
-    ):
-        raise RuntimeError(
-            "Duplicate auxiliary feature names."
+        X_native = (
+            preprocess_xgb_native_frame(
+                features,
+                preprocessor
+                .export_state(),
+            )
         )
 
-    print(
-        "[FINAL-FEATURE-ROUTING] "
-        f"xgb_features={X.shape[1]} "
-        f"aux_features={X_aux.shape[1]} "
-        f"entity_only_features="
-        f"{len(aux_entity_columns)}"
-    )
+        native_rounds = int(
+            ensemble_state[
+                "final_iterations"
+            ][
+                "xgb_native_cat"
+            ]
+        )
+
+        print(
+            "[FINAL] Training native "
+            "categorical XGBoost "
+            f"for {native_rounds} rounds..."
+        )
+
+        native_cat_model = (
+            train_xgboost_native_cat_full(
+                X_native,
+                y,
+                sample_weight,
+                config.models,
+                num_boost_round=(
+                    native_rounds
+                ),
+            )
+        )
+
+        native_cat_path = (
+            model_dir
+            / "xgb_native_cat.json"
+        )
+
+        native_cat_model.save_model(
+            str(
+                native_cat_path
+            )
+        )
+
+        del (
+            native_cat_model,
+            X_native,
+        )
+
+        gc.collect()
 
     lgb_rounds = int(
         ensemble_state[
@@ -2450,10 +2613,10 @@ def train_and_save_final_models(
     )
 
     lgb_model = train_lightgbm_full(
-        X_aux,
+        X,
         y,
         sample_weight,
-        aux_categorical_indices,
+        preprocessor.categorical_indices,
         config.models,
         num_boost_round=lgb_rounds,
     )
@@ -2472,13 +2635,14 @@ def train_and_save_final_models(
     cat_iterations = int(ensemble_state["final_iterations"]["cat"])
     print(f"[FINAL] Training CatBoost for {cat_iterations} iterations...")
     cat_model = train_catboost_full(
-        X_aux,
+        X,
         y,
         sample_weight,
-        aux_categorical_indices,
+        preprocessor.categorical_indices,
         config.models,
         iterations=cat_iterations,
     )
+
     cat_path = model_dir / "cat_model.cbm"
     cat_model.save_model(str(cat_path))
     del cat_model
@@ -2496,18 +2660,28 @@ def train_and_save_final_models(
             train_neural_full,
         )
 
-        neural_preprocessor = NeuralPreprocessor(
-            categorical_cols=aux_cat_cols,
-            numerical_cols=aux_num_cols,
-        ).fit(X_aux)
-
-        neural_state = (
-            neural_preprocessor.export_state()
+        neural_preprocessor = (
+            NeuralPreprocessor(
+                categorical_cols=(
+                    preprocessor.cat_cols_
+                ),
+                numerical_cols=(
+                    preprocessor.num_cols_
+                ),
+            )
+            .fit(X)
         )
 
-        train_arrays = prepare_neural_arrays(
-            X_aux,
-            neural_state,
+        neural_state = (
+            neural_preprocessor
+            .export_state()
+        )
+
+        train_arrays = (
+            prepare_neural_arrays(
+                X,
+                neural_state,
+            )
         )
         for offset, kind in enumerate(neural_model_order, start=1):
             epochs = int(ensemble_state["final_iterations"][kind])
@@ -2529,7 +2703,7 @@ def train_and_save_final_models(
             release_torch_memory()
         del train_arrays
 
-    del X, X_aux, sample_weight
+    del X, sample_weight
     gc.collect()
 
     raw_feature_cols = [col for col in train.columns if col != target]
@@ -2542,27 +2716,6 @@ def train_and_save_final_models(
         "preprocessor_state": (
             preprocessor.export_state()
         ),
-
-        "auxiliary_feature_names": list(
-            auxiliary_feature_names
-        ),
-
-        "feature_routing": {
-            "policy": (
-                "entity_v2_xgb_only_auxiliary_base"
-            ),
-            "xgb_feature_count": int(
-                len(
-                    preprocessor.feature_names_
-                )
-            ),
-            "auxiliary_feature_count": int(
-                len(auxiliary_feature_names)
-            ),
-            "entity_only_feature_count": int(
-                len(aux_entity_columns)
-            ),
-        },
 
         "neural_preprocessor_state": neural_state,
         "ensemble": dict(ensemble_state),
@@ -2623,6 +2776,38 @@ def train_and_save_final_models(
                 representative_diagnostics
             ),
         },
+        "xgb_native_categorical": {
+            "enabled": bool(
+                config.models
+                .xgb_native_cat_enabled
+            ),
+            "weight": float(
+                ensemble_state[
+                    "xgb_native_categorical"
+                ][
+                    "weight"
+                ]
+            ),
+            "model_file": (
+                native_cat_path.name
+                if native_cat_path
+                is not None
+                else None
+            ),
+            "feature_count": int(
+                len(
+                    preprocessor
+                    .feature_names_
+                )
+            ),
+            "validation": (
+                ensemble_state[
+                    "xgb_native_categorical"
+                ][
+                    "validation"
+                ]
+            ),
+        },        
         "xgb_temporal_views": {
             "view_order": [
                 "base",
@@ -2668,26 +2853,7 @@ def train_and_save_final_models(
         "calibration": dict(ensemble_state["calibration"]),
         "final_iterations": dict(ensemble_state["final_iterations"]),
         "n_features": int(len(preprocessor.feature_names_)),
-        "n_auxiliary_features": int(
-            len(auxiliary_feature_names)
-        ),
-
-        "feature_routing": {
-            "policy": (
-                "entity_v2_xgb_only_auxiliary_base"
-            ),
-            "xgb_feature_count": int(
-                len(
-                    preprocessor.feature_names_
-                )
-            ),
-            "auxiliary_feature_count": int(
-                len(auxiliary_feature_names)
-            ),
-            "entity_only_feature_count": int(
-                len(aux_entity_columns)
-            ),
-        },        
+      
         "quality_assessment": dict(
             ensemble_state.get(
                 "quality_assessment",
@@ -2706,6 +2872,14 @@ def train_and_save_final_models(
                 neural_paths[name].name
                 for name in neural_model_order
             ],
+            *(
+                [
+                    native_cat_path.name
+                ]
+                if native_cat_path
+                is not None
+                else []
+            ),            
             bundle_path.name,
             "xgb_representation.json",
             "xgb_representative.json",
@@ -2768,6 +2942,31 @@ def train_and_save_final_models(
                 .xgb_multiview_pca_components
             ),
         }, 
+        "xgb_native_categorical": {
+            "enabled": bool(
+                config.models
+                .xgb_native_cat_enabled
+            ),
+            "weight": float(
+                ensemble_state[
+                    "xgb_native_categorical"
+                ][
+                    "weight"
+                ]
+            ),
+            "model_file": (
+                native_cat_path.name
+                if native_cat_path
+                is not None
+                else None
+            ),
+            "feature_count": int(
+                len(
+                    preprocessor
+                    .feature_names_
+                )
+            ),
+        },        
         "xgb_temporal_views": {
             "view_order": [
                 "base",

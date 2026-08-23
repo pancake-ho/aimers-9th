@@ -1182,6 +1182,154 @@ def preprocess_frame(df: pd.DataFrame, state: Mapping[str, object]) -> pd.DataFr
     matrix = pd.DataFrame(result, index=df.index)
     return matrix[list(state["feature_names"])]
 
+XGB_NATIVE_UNKNOWN = "__AIMERS_XGB_UNKNOWN__"
+
+
+def preprocess_xgb_native_frame(
+    df: pd.DataFrame,
+    state: Mapping[str, object],
+) -> pd.DataFrame:
+    """Build a train-fitted native-categorical XGBoost frame.
+
+    Safety contract
+    ---------------
+    - Category vocabularies come only from the training-side
+      TabularPreprocessor state.
+    - Evaluation rows never alter the vocabulary.
+    - Unseen categories are mapped row-wise to one fixed sentinel.
+    - Numeric imputations are also train-fitted.
+    """
+
+    result: Dict[str, pd.Series] = {}
+
+    cat_cols = list(
+        state["cat_cols"]
+    )
+
+    num_cols = list(
+        state["num_cols"]
+    )
+
+    feature_names = list(
+        state["feature_names"]
+    )
+
+    category_maps = state[
+        "category_maps"
+    ]
+
+    numeric_medians = state[
+        "numeric_medians"
+    ]
+
+    for col in cat_cols:
+        values = (
+            df[col]
+            .fillna("__MISSING__")
+            .astype(str)
+        )
+
+        mapping = category_maps[
+            col
+        ]
+
+        categories = list(
+            mapping.keys()
+        )
+
+        if (
+            XGB_NATIVE_UNKNOWN
+            in categories
+        ):
+            raise ValueError(
+                "Reserved XGBoost unknown "
+                f"token already exists: {col}"
+            )
+
+        known_values = set(
+            categories
+        )
+
+        normalized = values.where(
+            values.isin(
+                known_values
+            ),
+            XGB_NATIVE_UNKNOWN,
+        )
+
+        dtype = pd.CategoricalDtype(
+            categories=[
+                *categories,
+                XGB_NATIVE_UNKNOWN,
+            ],
+            ordered=False,
+        )
+
+        result[col] = pd.Series(
+            pd.Categorical(
+                normalized,
+                dtype=dtype,
+            ),
+            index=df.index,
+            name=col,
+        )
+
+    for col in num_cols:
+        values = pd.to_numeric(
+            df[col],
+            errors="coerce",
+        )
+
+        median = float(
+            numeric_medians[col]
+        )
+
+        result[col] = (
+            values
+            .fillna(median)
+            .astype(np.float32)
+        )
+
+    matrix = pd.DataFrame(
+        result,
+        index=df.index,
+    )
+
+    missing = [
+        name
+        for name in feature_names
+        if name not in matrix.columns
+    ]
+
+    if missing:
+        raise ValueError(
+            "Native-categorical XGB "
+            "feature columns are missing: "
+            f"{missing[:20]}"
+        )
+
+    matrix = matrix[
+        feature_names
+    ]
+
+    if not matrix.columns.is_unique:
+        raise RuntimeError(
+            "Duplicate native XGBoost "
+            "feature columns."
+        )
+
+    for col in cat_cols:
+        if not isinstance(
+            matrix[col].dtype,
+            pd.CategoricalDtype,
+        ):
+            raise TypeError(
+                "Native XGBoost categorical "
+                f"dtype was lost: {col}"
+            )
+
+    return matrix
+
 
 def apply_numeric_pca_state(
     X: pd.DataFrame,
