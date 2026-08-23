@@ -1013,19 +1013,58 @@ echo "[STAGE] Working directory: $(pwd)"
 echo "[STAGE] workspace_mode=${WORK_MODE}"
 echo "[STAGE] data_dir=${AIMERS_DATA_DIR}"
 
+ENSEMBLE_POLICY="${
+    AIMERS_ENSEMBLE_POLICY:-shrinkage
+}"
+
+PRIVILEGED_DISTILL="${
+    AIMERS_PRIVILEGED_DISTILL:-1
+}"
+
+REQUIRE_QUALITY_GATE="${
+    AIMERS_REQUIRE_QUALITY_GATE:-0
+}"
+
 TRAIN_ARGS=(
     "--clean"
     "--cat-task-type" "GPU"
     "--xgb-device" "cuda"
     "--nn-device" "cuda"
+    "--ensemble-policy" "${ENSEMBLE_POLICY}"
 )
 
+if [[
+    "${PRIVILEGED_DISTILL}"
+    == "1"
+]]; then
+    TRAIN_ARGS+=(
+        "--privileged-distill"
+    )
+fi
+
+if [[
+    "${REQUIRE_QUALITY_GATE}"
+    == "1"
+]]; then
+    TRAIN_ARGS+=(
+        "--require-quality-gate"
+    )
+fi
+
 echo \
-    "[TRAIN] XGBoost=CUDA, LightGBM=CPU, CatBoost=GPU, " \
+    "[TRAIN] ensemble_policy=${ENSEMBLE_POLICY} " \
+    "privileged_distill=${PRIVILEGED_DISTILL} " \
+    "require_quality_gate=${REQUIRE_QUALITY_GATE}"
+
+echo \
+    "[TRAIN] XGBoost=CUDA, " \
+    "LightGBM=CPU, " \
+    "CatBoost=GPU, " \
     "ResNet/FT-Transformer=CUDA"
 
 echo \
-    "[TRAIN] command: python scripts/train_submit.py " \
+    "[TRAIN] command: " \
+    "python scripts/train_submit.py " \
     "${TRAIN_ARGS[*]}"
 
 python scripts/train_submit.py \

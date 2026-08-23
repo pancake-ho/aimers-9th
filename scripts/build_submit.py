@@ -19,14 +19,6 @@ NEURAL_RUNTIME_PATH = PROJECT_ROOT / "src" / "neural.py"
 DIST_DIR = PROJECT_ROOT / "dist"
 ZIP_PATH = DIST_DIR / "submit.zip"
 
-CORE_MODEL_FILES = (
-    "xgb_model.json",
-    "lgb_model.txt",
-    "cat_model.cbm",
-    "bundle.pkl",
-    "manifest.json",
-)
-
 # DACON preinstalls these runtime libraries. Listing a different version in
 # submission/requirements.txt can replace the CUDA/Python-matched base package
 # and cause an installation failure before script.py starts.
@@ -49,35 +41,35 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _required_files() -> dict[str, Path]:
+def _required_files() -> dict[
+    str,
+    Path,
+]:
     files = {
         "script.py": (
-            SUBMISSION_DIR / "script.py"
+            SUBMISSION_DIR
+            / "script.py"
         ),
+
         "requirements.txt": (
             SUBMISSION_DIR
             / "requirements.txt"
         ),
+
         "model/runtime.py": (
             RUNTIME_PATH
         ),
     }
 
-    files.update(
-        {
-            f"model/{name}": (
-                MODEL_DIR / name
-            )
-            for name in CORE_MODEL_FILES
-        }
-    )
-
     manifest_path = (
-        MODEL_DIR / "manifest.json"
+        MODEL_DIR
+        / "manifest.json"
     )
 
-    # During very early preflight the trained
-    # manifest may not exist yet.
+    files[
+        "model/manifest.json"
+    ] = manifest_path
+
     if not manifest_path.is_file():
         return files
 
@@ -85,154 +77,51 @@ def _required_files() -> dict[str, Path]:
         "r",
         encoding="utf-8",
     ) as handle:
-        manifest = json.load(handle)
+        manifest = json.load(
+            handle
+        )
 
-    model_order = tuple(
+    model_files = list(
         manifest.get(
-            "model_order",
+            "model_files",
             (),
         )
     )
 
-    supported_orders = {
-        (
-            "xgb",
-            "lgb",
-            "cat",
-        ),
-        (
-            "xgb",
-            "lgb",
-            "cat",
-            "resnet",
-        ),
-        (
-            "xgb",
-            "lgb",
-            "cat",
-            "resnet",
-            "ft_transformer",
-        ),
+    if not model_files:
+        raise ValueError(
+            "manifest.model_files "
+            "must not be empty."
+        )
+
+    required_core = {
+        "xgb_model.json",
+        "bundle.pkl",
     }
 
-    if model_order not in supported_orders:
+    missing_core = (
+        required_core
+        - set(model_files)
+    )
+
+    if missing_core:
         raise ValueError(
-            "Unsupported manifest "
-            f"model_order: {model_order}"
+            "Manifest is missing "
+            "core model artifacts: "
+            f"{sorted(missing_core)}"
         )
 
-    # --------------------------------------------------------
-    # Optional XGBoost seed-bagging artifacts.
-    # --------------------------------------------------------
+    allowed_suffixes = {
+        ".json",
+        ".txt",
+        ".cbm",
+        ".pt",
+        ".pkl",
+    }
 
-    xgb_bagging = (
-        manifest.get(
-            "xgb_bagging",
-            {},
-        )
-    )
-    xgb_multiview = (
-        manifest.get(
-            "xgb_multiview"
-        )
-    )
-
-    if xgb_multiview:
-        for key in (
-            "representation_model_file",
-            "representative_model_file",
-        ):
-            filename = str(
-                xgb_multiview[
-                    key
-                ]
-            )
-
-            path_name = Path(
-                filename
-            )
-
-            if (
-                path_name.name
-                != filename
-                or path_name.suffix
-                != ".json"
-            ):
-                raise ValueError(
-                    "Invalid XGBoost "
-                    "multi-view artifact: "
-                    f"{filename}"
-                )
-
-            files[
-                f"model/{filename}"
-            ] = (
-                MODEL_DIR
-                / filename
-            )
-
-    xgb_temporal = (
-        manifest.get(
-            "xgb_temporal_views"
-        )
-    )
-
-    if xgb_temporal:
-        temporal_files = dict(
-            xgb_temporal[
-                "model_files"
-            ]
-        )
-
-        for name in (
-            "recent1",
-            "recent2",
-        ):
-            filename = str(
-                temporal_files[
-                    name
-                ]
-            )
-
-            path_name = Path(
-                filename
-            )
-
-            if (
-                path_name.name
-                != filename
-                or path_name.suffix
-                != ".json"
-            ):
-                raise ValueError(
-                    "Invalid temporal XGB "
-                    f"artifact: {filename}"
-                )
-
-            files[
-                f"model/{filename}"
-            ] = (
-                MODEL_DIR
-                / filename
-            )
-
-    xgb_native_cat = (
-        manifest.get(
-            "xgb_native_categorical"
-        )
-    )
-
-    if (
-        xgb_native_cat
-        and xgb_native_cat.get(
-            "enabled",
-            False,
-        )
-    ):
+    for raw_filename in model_files:
         filename = str(
-            xgb_native_cat[
-                "model_file"
-            ]
+            raw_filename
         )
 
         path_name = Path(
@@ -242,61 +131,20 @@ def _required_files() -> dict[str, Path]:
         if (
             path_name.name
             != filename
-            or path_name.suffix
-            != ".json"
         ):
             raise ValueError(
-                "Invalid native categorical "
-                f"XGB artifact: {filename}"
+                "Model artifact must "
+                "be a basename: "
+                f"{filename}"
             )
 
-        files[
-            f"model/{filename}"
-        ] = (
-            MODEL_DIR
-            / filename
-        )
-
-    xgb_model_files = list(
-        xgb_bagging.get(
-            "model_files",
-            [
-                "xgb_model.json",
-            ],
-        )
-    )
-
-    if not xgb_model_files:
-        raise ValueError(
-            "Manifest XGBoost model "
-            "file list is empty."
-        )
-
-    if (
-        xgb_model_files[0]
-        != "xgb_model.json"
-    ):
-        raise ValueError(
-            "First XGBoost artifact "
-            "must be xgb_model.json."
-        )
-
-    for filename in (
-        xgb_model_files
-    ):
-        path_name = Path(
-            filename
-        )
-
         if (
-            path_name.name
-            != filename
-            or path_name.suffix
-            != ".json"
+            path_name.suffix
+            not in allowed_suffixes
         ):
             raise ValueError(
-                "Invalid XGBoost "
-                "artifact filename: "
+                "Unexpected model "
+                "artifact suffix: "
                 f"{filename}"
             )
 
@@ -307,30 +155,22 @@ def _required_files() -> dict[str, Path]:
             / filename
         )
 
-    # Do not derive neural models using
-    # a hard-coded GBDT slice.
-    neural_names = [
-        name
-        for name in model_order
-        if name
+    has_neural_model = any(
+        filename
         in {
-            "resnet",
-            "ft_transformer",
+            "resnet.pt",
+            "ft_transformer.pt",
         }
-    ]
+        for filename
+        in model_files
+    )
 
-    if neural_names:
+    if has_neural_model:
         files[
             "model/neural_runtime.py"
-        ] = NEURAL_RUNTIME_PATH
-
-        for name in neural_names:
-            files[
-                f"model/{name}.pt"
-            ] = (
-                MODEL_DIR
-                / f"{name}.pt"
-            )
+        ] = (
+            NEURAL_RUNTIME_PATH
+        )
 
     return files
 

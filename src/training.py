@@ -66,26 +66,86 @@ NEURAL_MODEL_ORDER = ("resnet", "ft_transformer")
 
 WEIGHT_EPS = 1.0e-12
 
-outer_weights = dict(
-    zip(
-        ensemble_state[
+
+def _outer_weight_map(
+    ensemble_state: Mapping[
+        str,
+        object,
+    ],
+) -> Dict[str, float]:
+    model_order = tuple(
+        str(name)
+        for name
+        in ensemble_state[
             "model_order"
-        ],
+        ]
+    )
+
+    weights = np.asarray(
         ensemble_state[
             "weights"
         ],
+        dtype=np.float64,
     )
-)
 
-def outer_active(
+    if weights.shape != (
+        len(model_order),
+    ):
+        raise ValueError(
+            "Outer ensemble weight count "
+            "does not match model_order."
+        )
+
+    if not np.isfinite(
+        weights
+    ).all():
+        raise ValueError(
+            "Outer ensemble weights "
+            "must be finite."
+        )
+
+    if (
+        weights < 0.0
+    ).any():
+        raise ValueError(
+            "Outer ensemble weights "
+            "must be non-negative."
+        )
+
+    if not np.isclose(
+        weights.sum(),
+        1.0,
+        atol=1.0e-12,
+    ):
+        raise ValueError(
+            "Outer ensemble weights "
+            "must sum to one."
+        )
+
+    return {
+        name: float(weight)
+        for name, weight
+        in zip(
+            model_order,
+            weights,
+        )
+    }
+
+
+def _outer_active(
+    outer_weights: Mapping[
+        str,
+        float,
+    ],
     name: str,
 ) -> bool:
     return (
         abs(
             float(
-                outer_weights[
-                    name
-                ]
+                outer_weights.get(
+                    name,
+                    0.0,
+                )
             )
         )
         > WEIGHT_EPS
@@ -106,45 +166,88 @@ def _active_neural_models(config: ExperimentConfig) -> tuple[str, ...]:
 
 
 def _strategy_name(
-    model_order: tuple[str, ...],
+    model_order: tuple[
+        str,
+        ...,
+    ],
+    *,
+    ensemble_policy: str,
+    lupi_enabled: bool,
+    native_cat_enabled: bool,
 ) -> str:
-    suffix = (
-        "entityv2_nativecat_"
-        "timeviews_bag3_recent1_recent2_"
-        "fixedchamp_calibrated_v15"
+    parts = [
+        "temporal_xgb",
+        "entityv2",
+        "timeviews",
+        "bag3",
+        "recent1",
+        "recent2",
+    ]
+
+    if native_cat_enabled:
+        parts.append(
+            "nativecat"
+        )
+
+    if lupi_enabled:
+        parts.append(
+            "lupi"
+        )
+
+    parts.extend(
+        [
+            str(
+                ensemble_policy
+            ),
+            "calibrated",
+            "v16",
+        ]
     )
-
-    if model_order == GBDT_MODEL_ORDER:
-        return (
-            "temporal_xgb_"
-            + suffix
-            + "_lgb_cat"
-        )
-
-    if model_order == (
-        *GBDT_MODEL_ORDER,
-        "resnet",
-    ):
-        return (
-            "temporal_xgb_"
-            + suffix
-            + "_lgb_cat_resnet"
-        )
 
     if model_order == (
         *GBDT_MODEL_ORDER,
         "resnet",
         "ft_transformer",
     ):
-        return (
-            "temporal_xgb_"
-            + suffix
-            + "_lgb_cat_resnet_ftt"
+        parts.extend(
+            [
+                "lgb",
+                "cat",
+                "resnet",
+                "ftt",
+            ]
         )
 
-    raise ValueError(
-        "Unsupported model order: "
-        f"{model_order}"
+    elif model_order == (
+        *GBDT_MODEL_ORDER,
+        "resnet",
+    ):
+        parts.extend(
+            [
+                "lgb",
+                "cat",
+                "resnet",
+            ]
+        )
+
+    elif model_order == (
+        GBDT_MODEL_ORDER
+    ):
+        parts.extend(
+            [
+                "lgb",
+                "cat",
+            ]
+        )
+
+    else:
+        raise ValueError(
+            "Unsupported model order: "
+            f"{model_order}"
+        )
+
+    return "_".join(
+        parts
     )
 
 
@@ -2106,7 +2209,27 @@ def run_temporal_validation(
         },          
     }
     report = {
-        "strategy": _strategy_name(model_order),
+        "strategy": _strategy_name(
+            tuple(
+                ensemble_state[
+                    "model_order"
+                ]
+            ),
+            ensemble_policy=(
+                config
+                .ensemble_weight_policy
+            ),
+            lupi_enabled=bool(
+                config
+                .privileged
+                .enabled
+            ),
+            native_cat_enabled=bool(
+                config
+                .models
+                .xgb_native_cat_enabled
+            ),
+        ),
         "folds": fold_summaries,
         "weight_selection": weight_report,
         "calibration": calibrator,
@@ -2651,62 +2774,62 @@ def run_temporal_validation(
         },
 
         "thresholds": {
-            "2023_max_brier": (
+            "2023_max_regression_vs_xgb": float(
                 config
-                .submission_gate_2023_max_brier
+                .submission_gate_2023_max_regression_vs_xgb
             ),
 
-            "2024_min_gain_vs_reference": (
+            "2024_min_gain_vs_reference": float(
                 config
                 .submission_gate_2024_min_gain_vs_reference
             ),
 
-            "late_raw_min_gain_vs_reference": (
+            "late_raw_min_gain_vs_reference": float(
                 config
                 .submission_gate_late_raw_min_gain_vs_reference
             ),
 
-            "calibration_min_transfer_gain": (
+            "calibration_min_transfer_gain": float(
                 config
                 .submission_gate_calibration_min_transfer_gain
             ),
 
-            "late_calibrated_min_gain_vs_reference": (
+            "late_calibrated_min_gain_vs_reference": float(
                 config
                 .submission_gate_late_calibrated_min_gain_vs_reference
             ),
 
-            "entity_2024_min_gain": (
+            "entity_2024_max_regression": float(
                 config
-                .submission_gate_entity_2024_min_gain
+                .submission_gate_entity_2024_max_regression
             ),
 
-            "entity_late_min_gain": (
+            "entity_late_min_gain": float(
                 config
                 .submission_gate_entity_late_min_gain
             ),
 
-            "xgb_bagging_2024_min_gain": (
+            "xgb_bagging_2024_min_gain": float(
                 config
                 .submission_gate_xgb_bagging_2024_min_gain
             ),
 
-            "xgb_bagging_late_min_gain": (
+            "xgb_bagging_late_min_gain": float(
                 config
                 .submission_gate_xgb_bagging_late_min_gain
             ),
 
-            "minimum_forward_improvement": (
+            "minimum_forward_improvement": float(
                 config
                 .submission_gate_min_forward_improvement
             ),
 
-            "previous_2024_min_gain": (
+            "previous_2024_min_gain": float(
                 config
                 .submission_gate_previous_2024_min_gain
             ),
 
-            "previous_late_calibrated_min_gain": (
+            "previous_late_calibrated_min_gain": float(
                 config
                 .submission_gate_previous_late_calibrated_min_gain
             ),
@@ -2753,6 +2876,11 @@ def train_and_save_final_models(
         excluded_cols=config.features.excluded_cols,
     )
     X = preprocessor.fit_transform(features)
+    outer_weights = (
+        _outer_weight_map(
+            ensemble_state
+        )
+    )
 
     xgb_rounds = int(
         ensemble_state[
@@ -3179,7 +3307,10 @@ def train_and_save_final_models(
 
     lgb_path = None
 
-    if outer_active("lgb"):
+    if _outer_active(
+        outer_weights,
+        "lgb",
+    ):
         lgb_rounds = int(
             ensemble_state[
                 "final_iterations"
@@ -3220,7 +3351,10 @@ def train_and_save_final_models(
 
     cat_path = None
 
-    if outer_active("cat"):
+    if _outer_active(
+        outer_weights,
+        "cat",
+    ):
         cat_iterations = int(
             ensemble_state[
                 "final_iterations"
@@ -3272,8 +3406,9 @@ def train_and_save_final_models(
             "resnet",
             "ft_transformer",
         }
-        and outer_active(
-            name
+        and _outer_active(
+            outer_weights,
+            name,
         )
     )
     if neural_model_order:
@@ -3487,8 +3622,79 @@ def train_and_save_final_models(
     bundle_path = model_dir / "bundle.pkl"
     joblib.dump(bundle, bundle_path, compress=3)
 
+    model_files = [
+        *[
+            path.name
+            for path
+            in xgb_paths
+        ],
+
+        # Internal XGB experts currently remain
+        # packaged unconditionally for the first
+        # V16 correctness run.
+        representation_path.name,
+        representative_path.name,
+        recent1_path.name,
+        recent2_path.name,
+
+        bundle_path.name,
+    ]
+
+    if lgb_path is not None:
+        model_files.append(
+            lgb_path.name
+        )
+
+    if cat_path is not None:
+        model_files.append(
+            cat_path.name
+        )
+
+    for name in neural_model_order:
+        model_files.append(
+            neural_paths[
+                name
+            ].name
+        )
+
+    if native_cat_path is not None:
+        model_files.append(
+            native_cat_path.name
+        )
+
+    if lupi_path is not None:
+        model_files.append(
+            lupi_path.name
+        )
+
+    model_files = list(
+        dict.fromkeys(
+            model_files
+        )
+    )
+
     manifest = {
-        "strategy": _strategy_name(tuple(ensemble_state["model_order"])),
+        "strategy": _strategy_name(
+            tuple(
+                ensemble_state[
+                    "model_order"
+                ]
+            ),
+            ensemble_policy=(
+                config
+                .ensemble_weight_policy
+            ),
+            lupi_enabled=bool(
+                config
+                .privileged
+                .enabled
+            ),
+            native_cat_enabled=bool(
+                config
+                .models
+                .xgb_native_cat_enabled
+            ),
+        ),
         "bundle_version": 7,
         "model_order": list(ensemble_state["model_order"]),
         "weights": list(ensemble_state["weights"]),
@@ -3502,32 +3708,9 @@ def train_and_save_final_models(
                 {},
             )
         ),        
-        "model_files": [
-            *[
-                path.name
-                for path
-                in xgb_paths
-            ],
-            lgb_path.name,
-            cat_path.name,
-            *[
-                neural_paths[name].name
-                for name in neural_model_order
-            ],
-            *(
-                [
-                    native_cat_path.name
-                ]
-                if native_cat_path
-                is not None
-                else []
-            ),            
-            bundle_path.name,
-            "xgb_representation.json",
-            "xgb_representative.json",
-            recent1_path.name,
-            recent2_path.name,            
-        ],
+        "model_files": (
+            model_files
+        ),
         "xgb_bagging": {
             "seeds": [
                 int(seed)

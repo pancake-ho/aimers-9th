@@ -874,6 +874,29 @@ def select_calibration_aware_shrunk_weights(
             "calibration_aware_"
             "reference_shrinkage"
         ),
+        "calibration_accepted": bool(
+            selected_calibrator[
+                "accepted"
+            ]
+        ),
+
+        "calibration_transfer_gain": float(
+            selected_calibrator[
+                "transfer_gain"
+            ]
+        ),
+
+        "calibration_method": str(
+            selected_calibrator[
+                "method"
+            ]
+        ),
+
+        "selected_2023_regression_vs_reference": float(
+            selected_record[
+                "2023_regression_vs_reference"
+            ]
+        ),
         "model_order": list(
             model_order
         ),

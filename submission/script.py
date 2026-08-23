@@ -225,43 +225,62 @@ def _load_gbdt_models(
             model
         )
 
-    lgb_path = (
-        MODEL_DIR
-        / "lgb_model.txt"
-    )
+    lgb_model = None
 
-    cat_path = (
-        MODEL_DIR
-        / "cat_model.cbm"
-    )
-
-    for path in (
-        lgb_path,
-        cat_path,
+    if (
+        "lgb"
+        in active_outer_models
     ):
-        if not path.exists():
+        lgb_path = (
+            MODEL_DIR
+            / "lgb_model.txt"
+        )
+
+        if not lgb_path.exists():
             raise FileNotFoundError(
-                path
+                lgb_path
             )
 
-    lgb_model = lgb.Booster(
-        model_file=str(
-            lgb_path
+        lgb_model = lgb.Booster(
+            model_file=str(
+                lgb_path
+            )
         )
-    )
 
-    cat_model = (
-        CatBoostClassifier()
-    )
+    cat_model = None
 
-    cat_model.load_model(
-        str(cat_path)
-    )
+    if (
+        "cat"
+        in active_outer_models
+    ):
+        cat_path = (
+            MODEL_DIR
+            / "cat_model.cbm"
+        )
+
+        if not cat_path.exists():
+            raise FileNotFoundError(
+                cat_path
+            )
+
+        cat_model = (
+            CatBoostClassifier()
+        )
+
+        cat_model.load_model(
+            str(
+                cat_path
+            )
+        )
 
     print(
         "[XGB-BAG] loaded_models="
         f"{len(xgb_models)} "
-        f"seeds={xgb_seeds}"
+        f"seeds={xgb_seeds} "
+        f"lgb_active="
+        f"{lgb_model is not None} "
+        f"cat_active="
+        f"{cat_model is not None}"
     )
 
     return (
@@ -401,6 +420,17 @@ def main() -> None:
         f"{sorted(active_outer_models)}"
     )
 
+    active_neural_names = [
+        name
+        for name
+        in (
+            "resnet",
+            "ft_transformer",
+        )
+        if name
+        in active_outer_models
+    ]
+
     supported_orders = [
         ["xgb", "lgb", "cat"],
         [
@@ -427,11 +457,7 @@ def main() -> None:
     neural = None
     neural_device = None
 
-    if (
-        "resnet" in model_order
-        or "ft_transformer"
-        in model_order
-    ):
+    if active_neural_names:
         neural = _load_module(
             "neural_runtime.py",
             "aimers_neural_runtime",
@@ -488,6 +514,121 @@ def main() -> None:
         ],
     )
 
+    lupi_state = (
+        bundle.get(
+            "xgb_lupi",
+            {},
+        )
+    )
+
+    if (
+        lupi_state.get(
+            "enabled",
+            False,
+        )
+    ):
+        lupi_weight = float(
+            lupi_state.get(
+                "weight",
+                0.0,
+            )
+        )
+
+        if lupi_weight > WEIGHT_EPS:
+            lupi_filename = str(
+                lupi_state.get(
+                    "model_file"
+                )
+            )
+
+            if (
+                not lupi_filename
+                or lupi_filename
+                == "None"
+            ):
+                raise ValueError(
+                    "LUPI is enabled but "
+                    "model_file is absent."
+                )
+
+            lupi_path = (
+                MODEL_DIR
+                / lupi_filename
+            )
+
+            if not lupi_path.exists():
+                raise FileNotFoundError(
+                    lupi_path
+                )
+
+            lupi_model = (
+                xgb.Booster()
+            )
+
+            lupi_model.load_model(
+                str(
+                    lupi_path
+                )
+            )
+
+            lupi_model.set_param(
+                {
+                    "nthread": 6,
+                    "device": "cpu",
+                }
+            )
+
+            lupi_prediction = np.asarray(
+                lupi_model.predict(
+                    dtest
+                ),
+                dtype=np.float64,
+            )
+
+            if (
+                lupi_prediction.shape
+                != xgb_prediction.shape
+            ):
+                raise ValueError(
+                    "LUPI prediction "
+                    "shape mismatch."
+                )
+
+            if not np.isfinite(
+                lupi_prediction
+            ).all():
+                raise ValueError(
+                    "LUPI prediction "
+                    "contains NaN/inf."
+                )
+
+            xgb_prediction = (
+                (
+                    1.0
+                    - lupi_weight
+                )
+                * xgb_prediction
+                + lupi_weight
+                * lupi_prediction
+            )
+
+            xgb_prediction = np.clip(
+                xgb_prediction,
+                1.0e-6,
+                1.0 - 1.0e-6,
+            )
+
+            print(
+                "[XGB-LUPI] "
+                f"weight="
+                f"{lupi_weight:.3f}"
+            )
+
+            del (
+                lupi_model,
+                lupi_prediction,
+            )
+
     native_state = bundle.get(
         "xgb_native_categorical"
     )
@@ -541,7 +682,8 @@ def main() -> None:
         lgb_model,
         cat_model,
     ) = _load_gbdt_models(
-        bundle
+        bundle,
+        active_outer_models,
     )
 
     dtest = xgb.DMatrix(
@@ -874,39 +1016,49 @@ def main() -> None:
             X_native,
         )
 
-    lgb_prediction = np.asarray(
-        lgb_model.predict(
-            X,
-            num_threads=6,
-        ),
-        dtype=np.float64,
-    )
-
-    cat_prediction = np.asarray(
-        cat_model.predict_proba(
-            X,
-            thread_count=6,
-        )[:, 1],
-        dtype=np.float64,
-    )
-
     predictions = {
         "xgb": xgb_prediction,
-        "lgb": lgb_prediction,
-        "cat": cat_prediction,
     }
 
+    if lgb_model is not None:
+        predictions[
+            "lgb"
+        ] = np.asarray(
+            lgb_model.predict(
+                X,
+                num_threads=6,
+            ),
+            dtype=np.float64,
+        )
+
+    if cat_model is not None:
+        predictions[
+            "cat"
+        ] = np.asarray(
+            cat_model.predict_proba(
+                X,
+                thread_count=6,
+            )[:, 1],
+            dtype=np.float64,
+        )
+    
     del (
         dtest,
         xgb_models,
-        lgb_model,
-        cat_model,
     )
+
+    if lgb_model is not None:
+        del lgb_model
+
+    if cat_model is not None:
+        del cat_model
 
     gc.collect()
 
     if neural is not None:
-        neural_names = model_order[3:]
+        neural_names = (
+            active_neural_names
+        )
 
         print(
             "[6/8] Predict neural models: "
@@ -980,15 +1132,49 @@ def main() -> None:
         "train-only calibration"
     )
 
-    ensemble = bundle["ensemble"]
+    active_names = [
+        name
+        for name
+        in model_order
+        if name
+        in active_outer_models
+    ]
+
+    active_weights = np.asarray(
+        [
+            outer_weight[
+                name
+            ]
+            for name
+            in active_names
+        ],
+        dtype=np.float64,
+    )
+
+    if (
+        active_weights.size == 0
+        or active_weights.sum()
+        <= 0.0
+    ):
+        raise RuntimeError(
+            "No active outer "
+            "ensemble models."
+        )
+
+    active_weights /= (
+        active_weights.sum()
+    )
 
     prediction = (
         runtime.blend_predictions(
             [
-                predictions[name]
-                for name in model_order
+                predictions[
+                    name
+                ]
+                for name
+                in active_names
             ],
-            ensemble["weights"],
+            active_weights,
         )
     )
 
