@@ -261,7 +261,7 @@ class ModelConfig:
     # weight is capped so V13 remains the stable anchor.
     # --------------------------------------------------------
 
-    xgb_native_cat_enabled: bool = True
+    xgb_native_cat_enabled: bool = False
 
     xgb_native_cat_seed: int = 7026
 
@@ -341,6 +341,83 @@ class ModelConfig:
 
 
 @dataclass(frozen=True)
+class PrivilegedDistillationConfig:
+    """
+    Training-only Learning Using Privileged Information.
+
+    Current-pitch Trackman values are NEVER exported to the
+    submission runtime.
+
+    They are used only to train a teacher on historical train rows.
+    The deployed student receives the normal pre-pitch feature view.
+    """
+
+    enabled: bool = False
+
+    # --------------------------------------------------------
+    # High-precision train <-> Trackman pitch alignment.
+    #
+    # Pitcher identity itself reuses the already fitted
+    # official-data-only entity mapping.
+    #
+    # Within one pitcher-season we then align the chronological
+    # pre-pitch state sequence.
+    # --------------------------------------------------------
+
+    min_entity_confidence: float = 0.05
+
+    min_matching_block: int = 6
+
+    min_pair_matched_rows: int = 20
+
+    min_pair_match_ratio: float = 0.10
+
+    # --------------------------------------------------------
+    # Privileged teacher.
+    #
+    # IMPORTANT:
+    # The target season's labels must never be used for teacher
+    # early stopping because those predictions become distillation
+    # targets for that same season.
+    #
+    # Therefore teacher rounds are fixed in advance.
+    # --------------------------------------------------------
+
+    teacher_seed: int = 8026
+    teacher_num_boost_round: int = 200
+    teacher_min_train_rows: int = 5000
+
+    # --------------------------------------------------------
+    # Student.
+    #
+    # y_soft =
+    #   (1 - lambda) * y
+    #   + lambda * teacher_probability
+    #
+    # only where an OOF/prequential teacher probability exists.
+    # --------------------------------------------------------
+
+    distill_strength: float = 0.20
+
+    student_seed: int = 9026
+
+    student_weight_candidates: Tuple[
+        float,
+        ...,
+    ] = (
+        0.00,
+        0.10,
+        0.20,
+        0.30,
+    )
+
+    # The student is an INTERNAL XGB expert.
+    # Do not accept tiny validation noise as a new champion.
+    minimum_forward_gain: float = 3.0e-5
+
+    maximum_2023_regression: float = 7.5e-5
+
+@dataclass(frozen=True)
 class NeuralConfig:
     """Training settings for optional out-of-family tabular learners."""
 
@@ -404,6 +481,13 @@ class ExperimentConfig:
     neural: NeuralConfig = field(
         default_factory=NeuralConfig
     )
+    privileged: PrivilegedDistillationConfig = field(
+        default_factory=PrivilegedDistillationConfig
+    )
+
+    # "fixed" keeps the old V10 frozen outer weights.
+    # "shrinkage" runs calibration-aware temporal shrinkage.
+    ensemble_weight_policy: str = "fixed"    
 
     use_trackman: bool = True
 
@@ -515,7 +599,9 @@ class ExperimentConfig:
     # reference and its ABS calibration must transfer.
     # --------------------------------------------------------
 
-    submission_gate_2023_max_brier: float = 0.25018
+    submission_gate_2023_max_regression_vs_xgb: float = (
+        7.5e-5
+    )
 
     submission_gate_2024_min_gain_vs_reference: float = 0.0
 
@@ -571,9 +657,13 @@ class ExperimentConfig:
     # Keep these values for the separate entity experiment.
     # --------------------------------------------------------
 
-    submission_gate_entity_2024_min_gain: float = 3.0e-5
+    submission_gate_entity_2024_max_regression: float = (
+        1.0e-5
+    )
 
-    submission_gate_entity_late_min_gain: float = 3.0e-5
+    submission_gate_entity_late_min_gain: float = (
+        3.0e-5
+    )
 
     # --------------------------------------------------------
     # V11b frozen champion ensemble.

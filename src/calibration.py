@@ -451,7 +451,7 @@ def select_calibration_aware_shrunk_weights(
     reference_model: str,
     alpha_grid: Sequence[float],
     early_month_max: int,
-    maximum_2023_brier: float,
+    maximum_2023_regression_vs_reference: float,
     minimum_calibration_transfer_gain: float,
 ) -> tuple[
     np.ndarray,
@@ -750,27 +750,40 @@ def select_calibration_aware_shrunk_weights(
             - deployed_late_brier
         )
 
-        feasible = bool(
+        reference_2023_brier = float(
+            reference_fold_brier["2023"]
+        )
+
+        regression_2023_vs_reference = float(
             fold_brier["2023"]
+            - reference_2023_brier
+        )
+
+        feasible = bool(
+            regression_2023_vs_reference
             <= float(
-                maximum_2023_brier
+                maximum_2023_regression_vs_reference
             )
             + 1.0e-15
+
             and gain_2024_vs_reference
             + float(
                 non_degradation_tolerance
             )
             >= -1.0e-15
+
             and gain_late_raw_vs_reference
             + float(
                 non_degradation_tolerance
             )
             >= -1.0e-15
-            and calibrator["accepted"]
+
+            and bool(
+                calibrator["accepted"]
+            )
+
             and float(
-                calibrator[
-                    "transfer_gain"
-                ]
+                calibrator["transfer_gain"]
             )
             + 1.0e-15
             >= float(
@@ -811,6 +824,9 @@ def select_calibration_aware_shrunk_weights(
             ),
             "feasible": bool(
                 feasible
+            ),
+            "2023_regression_vs_reference": float(
+                regression_2023_vs_reference
             ),
         }
 

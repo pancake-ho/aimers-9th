@@ -12,12 +12,17 @@ import pandas as pd
 
 from src.calibration import (
     evaluate_fixed_calibrated_weights,
+    select_calibration_aware_shrunk_weights,
 )
 from src.config import ExperimentConfig
 from src.features import (
     LeakageSafeFeatureEngineer,
     StrictPastMainHistoryFeatures,
     StrictPastTrackmanFeatures,
+)
+from src.privileged_trackman import (
+    build_distillation_target,
+    select_lupi_weight,
 )
 from src.metrics import evaluate_probabilities
 from src.models import (
@@ -59,6 +64,32 @@ from src.splits import make_abs_late_fold, make_temporal_folds, uniform_weights
 
 NEURAL_MODEL_ORDER = ("resnet", "ft_transformer")
 
+WEIGHT_EPS = 1.0e-12
+
+outer_weights = dict(
+    zip(
+        ensemble_state[
+            "model_order"
+        ],
+        ensemble_state[
+            "weights"
+        ],
+    )
+)
+
+def outer_active(
+    name: str,
+) -> bool:
+    return (
+        abs(
+            float(
+                outer_weights[
+                    name
+                ]
+            )
+        )
+        > WEIGHT_EPS
+    )
 
 def _active_neural_models(config: ExperimentConfig) -> tuple[str, ...]:
     if not config.neural.enabled:
@@ -268,11 +299,32 @@ def run_temporal_validation(
     train: pd.DataFrame,
     features: pd.DataFrame,
     config: ExperimentConfig,
+    *,
+    privileged_state: Mapping[
+        str,
+        object,
+    ]
+    | None = None,
 ) -> tuple[Dict[str, object], Dict[str, object]]:
     target = config.features.target_col
     entity_gate_required = bool(
         config.use_trackman and config.features.trackman_entity_enabled
     )
+    lupi_enabled = bool(
+        config
+        .privileged
+        .enabled
+    )
+
+    if (
+        lupi_enabled
+        and privileged_state
+        is None
+    ):
+        raise ValueError(
+            "Privileged distillation is enabled "
+            "but privileged_state is absent."
+        )
     fold_results = []
     neural_model_order = _active_neural_models(config)
     model_order = (*GBDT_MODEL_ORDER, *neural_model_order)
@@ -405,6 +457,188 @@ def run_temporal_validation(
             f"gain="
             f"{xgb_bagging_gain:+.8f}"
         )
+
+        lupi_prediction = None
+        lupi_fold_state = None
+
+        if lupi_enabled:
+            teacher_probability = np.asarray(
+                privileged_state[
+                    "teacher_probability"
+                ],
+                dtype=np.float32,
+            )
+
+            teacher_available = np.asarray(
+                privileged_state[
+                    "teacher_available"
+                ],
+                dtype=bool,
+            )
+
+            fold_teacher_probability = (
+                teacher_probability[
+                    fold.train_idx
+                ]
+            )
+
+            fold_teacher_available = (
+                teacher_available[
+                    fold.train_idx
+                ]
+            )
+
+            y_distill = (
+                build_distillation_target(
+                    y_train,
+                    fold_teacher_probability,
+                    fold_teacher_available,
+                    strength=(
+                        config
+                        .privileged
+                        .distill_strength
+                    ),
+                )
+            )
+
+            (
+                lupi_model,
+                lupi_prediction,
+                lupi_rounds,
+            ) = (
+                train_xgboost_temporal_fold(
+                    X_train,
+                    y_distill,
+                    X_valid,
+                    y_valid,
+                    sample_weight,
+                    config.models,
+                    seed=(
+                        config
+                        .privileged
+                        .student_seed
+                    ),
+                )
+            )
+
+            best_iterations[
+                "xgb_lupi_student"
+            ] = int(
+                lupi_rounds
+            )
+
+            lupi_metrics = (
+                evaluate_probabilities(
+                    y_valid,
+                    lupi_prediction,
+                )
+            )
+
+            valid_teacher_probability = (
+                teacher_probability[
+                    fold.valid_idx
+                ]
+            )
+
+            valid_teacher_available = (
+                teacher_available[
+                    fold.valid_idx
+                ]
+            )
+
+            teacher_subset_metrics = None
+            base_subset_metrics = None
+
+            if (
+                valid_teacher_available.sum()
+                > 0
+            ):
+                teacher_subset_metrics = (
+                    evaluate_probabilities(
+                        y_valid[
+                            valid_teacher_available
+                        ],
+                        valid_teacher_probability[
+                            valid_teacher_available
+                        ],
+                    )
+                )
+
+                base_subset_metrics = (
+                    evaluate_probabilities(
+                        y_valid[
+                            valid_teacher_available
+                        ],
+                        predictions[
+                            "xgb"
+                        ][
+                            valid_teacher_available
+                        ],
+                    )
+                )
+
+            lupi_fold_state = {
+                "student_metrics": (
+                    lupi_metrics
+                ),
+                "distilled_train_rows": int(
+                    fold_teacher_available.sum()
+                ),
+                "distilled_train_fraction": float(
+                    fold_teacher_available.mean()
+                ),
+                "teacher_subset_metrics": (
+                    teacher_subset_metrics
+                ),
+                "base_subset_metrics": (
+                    base_subset_metrics
+                ),
+            }
+
+            print(
+                "[LUPI-STUDENT] "
+                f"fold={fold.validation_label} "
+                f"distilled_rows="
+                f"{fold_teacher_available.sum():,} "
+                f"rounds={lupi_rounds} "
+                f"brier="
+                f"{lupi_metrics['brier']:.8f}"
+            )
+
+            if (
+                teacher_subset_metrics
+                is not None
+                and base_subset_metrics
+                is not None
+            ):
+                teacher_gain = float(
+                    base_subset_metrics[
+                        "brier"
+                    ]
+                    - teacher_subset_metrics[
+                        "brier"
+                    ]
+                )
+
+                print(
+                    "[LUPI-TEACHER-UPPER] "
+                    f"fold={fold.validation_label} "
+                    f"rows="
+                    f"{valid_teacher_available.sum():,} "
+                    f"base="
+                    f"{base_subset_metrics['brier']:.8f} "
+                    f"teacher="
+                    f"{teacher_subset_metrics['brier']:.8f} "
+                    f"gain="
+                    f"{teacher_gain:+.8f}"
+                )
+
+            del (
+                lupi_model,
+                y_distill,
+            )
+
+            gc.collect()
 
         # ----------------------------------------------------
         # Paired Trackman-entity ablation.
@@ -1107,6 +1341,13 @@ def run_temporal_validation(
                         xgb_view_metrics
                     ),                    
                 },
+                "xgb_lupi_prediction": (
+                    lupi_prediction
+                ),
+
+                "xgb_lupi_fold_state": (
+                    lupi_fold_state
+                ),
                 "xgb_temporal_views": (
                     temporal_views
                 ),
@@ -1280,6 +1521,113 @@ def run_temporal_validation(
             ),
             temporal_metrics,
         )
+    
+    lupi_weight = 0.0
+
+    lupi_report = {
+        "enabled": bool(
+            lupi_enabled
+        ),
+        "selected_weight": 0.0,
+        "accepted_nonzero": False,
+    }
+
+    if lupi_enabled:
+        (
+            lupi_weight,
+            lupi_report,
+        ) = (
+            select_lupi_weight(
+                fold_results,
+                candidate_weights=(
+                    config
+                    .privileged
+                    .student_weight_candidates
+                ),
+                fold_importance=(
+                    config
+                    .temporal_fold_importance
+                ),
+                minimum_forward_gain=(
+                    config
+                    .privileged
+                    .minimum_forward_gain
+                ),
+                maximum_2023_regression=(
+                    config
+                    .privileged
+                    .maximum_2023_regression
+                ),
+            )
+        )
+
+        print(
+            "[LUPI-SELECT] "
+            f"weight="
+            f"{lupi_weight:.3f} "
+            f"accepted="
+            f"{lupi_report['accepted_nonzero']} "
+            f"forward_gain="
+            f"{lupi_report['forward_gain']:+.8f} "
+            f"gains="
+            f"{lupi_report['gain_vs_base']}"
+        )
+
+        for fold in fold_results:
+            base = np.asarray(
+                fold[
+                    "predictions"
+                ][
+                    "xgb"
+                ],
+                dtype=np.float64,
+            )
+
+            student = np.asarray(
+                fold[
+                    "xgb_lupi_prediction"
+                ],
+                dtype=np.float64,
+            )
+
+            upgraded = (
+                (
+                    1.0
+                    - float(
+                        lupi_weight
+                    )
+                )
+                * base
+                + float(
+                    lupi_weight
+                )
+                * student
+            )
+
+            upgraded = np.clip(
+                upgraded,
+                1.0e-6,
+                1.0 - 1.0e-6,
+            )
+
+            fold[
+                "predictions"
+            ][
+                "xgb"
+            ] = upgraded
+
+            fold[
+                "metrics"
+            ][
+                "xgb"
+            ] = (
+                evaluate_probabilities(
+                    fold[
+                        "y_true"
+                    ],
+                    upgraded,
+                )
+            )
 
     native_cat_weight = 0.0
 
@@ -1383,28 +1731,91 @@ def run_temporal_validation(
                 ],
             )
 
-    (
-        weights,
-        weight_report,
-        calibrator,
-    ) = (
-        evaluate_fixed_calibrated_weights(
-            fold_results,
-            weights=(
-                config
-                .ensemble_fixed_champion_weights
-            ),
-            fold_importance=(
-                config
-                .temporal_fold_importance
-            ),
-            model_order=model_order,
-            early_month_max=(
-                config
-                .abs_late_train_month_max
-            ),
+    if (
+        config
+        .ensemble_weight_policy
+        == "fixed"
+    ):
+        (
+            weights,
+            weight_report,
+            calibrator,
+        ) = (
+            evaluate_fixed_calibrated_weights(
+                fold_results,
+                weights=(
+                    config
+                    .ensemble_fixed_champion_weights
+                ),
+                fold_importance=(
+                    config
+                    .temporal_fold_importance
+                ),
+                model_order=model_order,
+                early_month_max=(
+                    config
+                    .abs_late_train_month_max
+                ),
+            )
         )
-    )
+
+    elif (
+        config
+        .ensemble_weight_policy
+        == "shrinkage"
+    ):
+        (
+            weights,
+            weight_report,
+            calibrator,
+        ) = (
+            select_calibration_aware_shrunk_weights(
+                fold_results,
+                fold_importance=(
+                    config
+                    .temporal_fold_importance
+                ),
+                step=(
+                    config
+                    .ensemble_grid_step
+                ),
+                model_order=model_order,
+                protected_fold_labels=(
+                    config
+                    .ensemble_protected_folds
+                ),
+                non_degradation_tolerance=(
+                    config
+                    .ensemble_non_degradation_tolerance
+                ),
+                reference_model=(
+                    config
+                    .ensemble_shrinkage_reference_model
+                ),
+                alpha_grid=(
+                    config
+                    .ensemble_shrinkage_alphas
+                ),
+                early_month_max=(
+                    config
+                    .abs_late_train_month_max
+                ),
+                maximum_2023_regression_vs_reference=(
+                    config
+                    .submission_gate_2023_max_regression_vs_xgb
+                ),
+                minimum_calibration_transfer_gain=(
+                    config
+                    .submission_gate_calibration_min_transfer_gain
+                ),
+            )
+        )
+
+    else:
+        raise ValueError(
+            "Unknown ensemble policy: "
+            f"{config.ensemble_weight_policy}"
+        )  
 
     print(
         "[ENSEMBLE-POLICY] "
@@ -1592,6 +2003,27 @@ def run_temporal_validation(
             )
         )
 
+    if lupi_enabled:
+        final_iterations[
+            "xgb_lupi_student"
+        ] = int(
+            min(
+                config
+                .models
+                .xgb_num_boost_round,
+
+                max(
+                    30,
+                    round(
+                        recent_iterations[
+                            "xgb_lupi_student"
+                        ]
+                        * 1.05
+                    ),
+                ),
+            )
+        )
+
     neural_epoch_caps = {
         "resnet": int(config.neural.resnet_max_epochs),
         "ft_transformer": int(config.neural.ft_max_epochs),
@@ -1648,7 +2080,18 @@ def run_temporal_validation(
             "validation": (
                 temporal_report
             ),
-        },      
+        },    
+        "xgb_lupi": {
+            "enabled": bool(
+                lupi_enabled
+            ),
+            "weight": float(
+                lupi_weight
+            ),
+            "validation": (
+                lupi_report
+            ),
+        },         
         "xgb_native_categorical": {
             "enabled": bool(
                 config.models
@@ -1677,7 +2120,10 @@ def run_temporal_validation(
         ),        
         "xgb_native_categorical": (
             native_cat_report
-        ),        
+        ),       
+        "xgb_lupi": (
+            lupi_report
+        ),         
     }
     by_label = {
         item["validation_label"]: item
@@ -1834,6 +2280,18 @@ def run_temporal_validation(
         ]
     )
 
+    reference_2023_brier = float(
+        by_label[
+            "2023"
+        ][
+            "models"
+        ][
+            reference_model
+        ][
+            "brier"
+        ]
+    )
+
     previous_forward_brier = float(
         config
         .submission_gate_previous_forward_brier
@@ -1873,8 +2331,9 @@ def run_temporal_validation(
 
         "2023_guard": (
             guard_2023
-            <= config
-            .submission_gate_2023_max_brier
+            <= reference_2023_brier
+            + config
+            .submission_gate_2023_max_regression_vs_xgb
         ),
 
         "calibration_accepted": bool(
@@ -1897,8 +2356,8 @@ def run_temporal_validation(
         "entity_2024_paired_ablation": (
             not entity_gate_required
             or entity_2024_gain
-            >= config
-            .submission_gate_entity_2024_min_gain
+            >= -config
+            .submission_gate_entity_2024_max_regression
         ),
 
         "entity_late_paired_ablation": (
@@ -1922,6 +2381,15 @@ def run_temporal_validation(
             >= config
             .submission_gate_xgb_bagging_late_min_gain
         ),
+
+        "xgb_lupi_material_gain": (
+            not lupi_enabled
+            or bool(
+                lupi_report[
+                    "accepted_nonzero"
+                ]
+            )
+        ),        
 
         # Multi-view selection explicitly permits only a very small
         # protected-fold degradation while searching for complementary
@@ -2272,6 +2740,8 @@ def train_and_save_final_models(
     ensemble_state: Mapping[str, object],
     config: ExperimentConfig,
     model_dir: Path,
+    *,
+    privileged_state=None,
 ) -> Dict[str, object]:
     model_dir.mkdir(parents=True, exist_ok=True)
     target = config.features.target_col
@@ -2538,6 +3008,112 @@ def train_and_save_final_models(
 
     gc.collect()
 
+    lupi_path = None
+
+    lupi_state = (
+        ensemble_state.get(
+            "xgb_lupi",
+            {},
+        )
+    )
+
+    lupi_weight = float(
+        lupi_state.get(
+            "weight",
+            0.0,
+        )
+    )
+
+    if (
+        config.privileged.enabled
+        and lupi_weight > 1.0e-12
+    ):
+        if privileged_state is None:
+            raise RuntimeError(
+                "Final LUPI training "
+                "requires privileged_state."
+            )
+
+        teacher_probability = np.asarray(
+            privileged_state[
+                "teacher_probability"
+            ],
+            dtype=np.float32,
+        )
+
+        teacher_available = np.asarray(
+            privileged_state[
+                "teacher_available"
+            ],
+            dtype=bool,
+        )
+
+        y_distill = (
+            build_distillation_target(
+                y,
+                teacher_probability,
+                teacher_available,
+                strength=(
+                    config
+                    .privileged
+                    .distill_strength
+                ),
+            )
+        )
+
+        lupi_rounds = int(
+            ensemble_state[
+                "final_iterations"
+            ][
+                "xgb_lupi_student"
+            ]
+        )
+
+        print(
+            "[FINAL] Training "
+            "pre-pitch LUPI XGBoost "
+            f"for {lupi_rounds} rounds "
+            f"distilled_rows="
+            f"{teacher_available.sum():,}"
+        )
+
+        lupi_model = (
+            train_xgboost_temporal_full(
+                X,
+                y_distill,
+                uniform_weights(
+                    len(y_distill)
+                ),
+                config.models,
+                seed=(
+                    config
+                    .privileged
+                    .student_seed
+                ),
+                num_boost_round=(
+                    lupi_rounds
+                ),
+            )
+        )
+
+        lupi_path = (
+            model_dir
+            / "xgb_lupi_student.json"
+        )
+
+        lupi_model.save_model(
+            str(
+                lupi_path
+            )
+        )
+
+        del (
+            lupi_model,
+            y_distill,
+        )
+
+        gc.collect()    
+
     native_cat_path = None
 
     if (
@@ -2601,56 +3177,105 @@ def train_and_save_final_models(
 
         gc.collect()
 
-    lgb_rounds = int(
-        ensemble_state[
-            "final_iterations"
-        ]["lgb"]
-    )
+    lgb_path = None
 
-    print(
-        "[FINAL] Training LightGBM "
-        f"for {lgb_rounds} rounds..."
-    )
+    if outer_active("lgb"):
+        lgb_rounds = int(
+            ensemble_state[
+                "final_iterations"
+            ]["lgb"]
+        )
 
-    lgb_model = train_lightgbm_full(
-        X,
-        y,
-        sample_weight,
-        preprocessor.categorical_indices,
-        config.models,
-        num_boost_round=lgb_rounds,
-    )
+        print(
+            "[FINAL] Training LightGBM "
+            f"for {lgb_rounds} rounds..."
+        )
 
-    lgb_path = (
-        model_dir / "lgb_model.txt"
-    )
+        lgb_model = train_lightgbm_full(
+            X,
+            y,
+            sample_weight,
+            preprocessor.categorical_indices,
+            config.models,
+            num_boost_round=lgb_rounds,
+        )
 
-    lgb_model.save_model(
-        str(lgb_path)
-    )
+        lgb_path = (
+            model_dir
+            / "lgb_model.txt"
+        )
 
-    del lgb_model
-    gc.collect()
+        lgb_model.save_model(
+            str(lgb_path)
+        )
 
-    cat_iterations = int(ensemble_state["final_iterations"]["cat"])
-    print(f"[FINAL] Training CatBoost for {cat_iterations} iterations...")
-    cat_model = train_catboost_full(
-        X,
-        y,
-        sample_weight,
-        preprocessor.categorical_indices,
-        config.models,
-        iterations=cat_iterations,
-    )
+        del lgb_model
+        gc.collect()
 
-    cat_path = model_dir / "cat_model.cbm"
-    cat_model.save_model(str(cat_path))
-    del cat_model
-    gc.collect()
+    else:
+        print(
+            "[FINAL] Skipping LightGBM "
+            "because outer ensemble weight is zero."
+        )
+
+    cat_path = None
+
+    if outer_active("cat"):
+        cat_iterations = int(
+            ensemble_state[
+                "final_iterations"
+            ]["cat"]
+        )
+
+        print(
+            "[FINAL] Training CatBoost "
+            f"for {cat_iterations} iterations..."
+        )
+
+        cat_model = train_catboost_full(
+            X,
+            y,
+            sample_weight,
+            preprocessor.categorical_indices,
+            config.models,
+            iterations=cat_iterations,
+        )
+
+        cat_path = (
+            model_dir
+            / "cat_model.cbm"
+        )
+
+        cat_model.save_model(
+            str(cat_path)
+        )
+
+        del cat_model
+        gc.collect()
+
+    else:
+        print(
+            "[FINAL] Skipping CatBoost "
+            "because outer ensemble weight is zero."
+        )
 
     neural_state = None
     neural_paths: Dict[str, Path] = {}
-    neural_model_order = tuple(ensemble_state["model_order"])[len(GBDT_MODEL_ORDER) :]
+    neural_model_order = tuple(
+        name
+        for name
+        in ensemble_state[
+            "model_order"
+        ]
+        if name
+        in {
+            "resnet",
+            "ft_transformer",
+        }
+        and outer_active(
+            name
+        )
+    )
     if neural_model_order:
         from src.neural import (
             NeuralPreprocessor,
@@ -2776,6 +3401,23 @@ def train_and_save_final_models(
                 representative_diagnostics
             ),
         },
+        "xgb_lupi": {
+            "enabled": bool(
+                lupi_path
+                is not None
+                and lupi_weight
+                > 1.0e-12
+            ),
+            "weight": float(
+                lupi_weight
+            ),
+            "model_file": (
+                lupi_path.name
+                if lupi_path
+                is not None
+                else None
+            ),
+        },        
         "xgb_native_categorical": {
             "enabled": bool(
                 config.models

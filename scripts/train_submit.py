@@ -27,6 +27,7 @@ from src.config import (
     ExperimentConfig,
     ModelConfig,
     NeuralConfig,
+    PrivilegedDistillationConfig,
 )
 
 from src.data import (
@@ -129,6 +130,32 @@ def parse_args():
         ),
     )
 
+    parser.add_argument(
+        "--ensemble-policy",
+        choices=(
+            "fixed",
+            "shrinkage",
+        ),
+        default="fixed",
+        help=(
+            "Outer ensemble policy. "
+            "'fixed' reproduces the V10 frozen weights; "
+            "'shrinkage' selects the calibration-aware "
+            "temporal shrinkage candidate."
+        ),
+    )
+
+    parser.add_argument(
+        "--privileged-distill",
+        action="store_true",
+        help=(
+            "Enable training-only current-pitch "
+            "Trackman teacher distillation. "
+            "Privileged features are never exported "
+            "to submission inference."
+        ),
+    )    
+
     return parser.parse_args()
 
 
@@ -220,6 +247,11 @@ def main():
         use_trackman=(
             not args.no_trackman
         ),
+
+        ensemble_weight_policy=(
+            args.ensemble_policy
+        ),
+
         models=ModelConfig(
             cat_task_type=(
                 args.cat_task_type
@@ -228,6 +260,7 @@ def main():
                 args.xgb_device
             ),
         ),
+
         neural=NeuralConfig(
             enabled=(
                 not args.disable_neural
@@ -235,6 +268,14 @@ def main():
             device=(
                 args.nn_device
             ),
+        ),
+
+        privileged=(
+            PrivilegedDistillationConfig(
+                enabled=bool(
+                    args.privileged_distill
+                )
+            )
         ),
     )
 
@@ -346,6 +387,23 @@ def main():
         train,
         config,
     )
+    privileged_state = None
+
+    if config.privileged.enabled:
+        from src.privileged_trackman import (
+            build_prequential_teacher_state,
+        )
+
+        privileged_state = (
+            build_prequential_teacher_state(
+                train=train,
+                features=features,
+                feature_state=(
+                    feature_state
+                ),
+                config=config,
+            )
+        )
 
     # --------------------------------------------------------
     # Temporal validation
@@ -358,6 +416,9 @@ def main():
         train,
         features,
         config,
+        privileged_state=(
+            privileged_state
+        ),
     )
 
     submission_gate = (
@@ -494,6 +555,9 @@ def main():
             ),
             config=config,
             model_dir=model_dir,
+            privileged_state=(
+                privileged_state
+            ),
         )
     )
 

@@ -145,6 +145,7 @@ def _validate_inputs(
 
 def _load_gbdt_models(
     bundle,
+    active_outer_models,
 ):
     bagging_state = (
         bundle.get(
@@ -368,6 +369,36 @@ def main() -> None:
 
     model_order = list(
         bundle["ensemble"]["model_order"]
+    )
+
+    ensemble = bundle[
+        "ensemble"
+    ]
+
+    outer_weight = {
+        name: float(weight)
+        for name, weight
+        in zip(
+            model_order,
+            ensemble[
+                "weights"
+            ],
+        )
+    }
+
+    WEIGHT_EPS = 1.0e-12
+
+    active_outer_models = {
+        name
+        for name, weight
+        in outer_weight.items()
+        if abs(weight)
+        > WEIGHT_EPS
+    }
+
+    print(
+        "[MODEL] active_outer_models="
+        f"{sorted(active_outer_models)}"
     )
 
     supported_orders = [
