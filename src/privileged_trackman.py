@@ -166,6 +166,138 @@ def _pitch_token(row) -> tuple:
     )
 
 
+def _parse_trackman_game_dates(
+    values: pd.Series,
+) -> pd.Series:
+    """
+    Parse the official Trackman game_date column.
+
+    The official file contains at least two date encodings:
+
+        MM/DD/YYYY
+        YYYY-MM-DD
+
+    Slash-form dates may be non-zero-padded, e.g.
+
+        7/31/2021
+        11/4/2021
+
+    Do not rely on pandas' single-format inference because
+    pandas >= 2 parses a Series using a consistent inferred
+    format and can therefore coerce the other official format
+    to NaT.
+
+    This function is training-only. No test-row information is
+    used.
+    """
+
+    raw = (
+        values
+        .astype("string")
+        .str.strip()
+    )
+
+    if raw.isna().any():
+        missing_count = int(
+            raw.isna().sum()
+        )
+
+        raise ValueError(
+            "Trackman game_date contains "
+            f"{missing_count:,} missing values."
+        )
+
+    parsed = pd.Series(
+        pd.NaT,
+        index=raw.index,
+        dtype="datetime64[ns]",
+    )
+
+    # --------------------------------------------------------
+    # Historical slash format:
+    #
+    #   03/29/2019
+    #   7/31/2021
+    #   11/4/2021
+    #
+    # %m/%d/%Y accepts both padded and non-padded values.
+    # --------------------------------------------------------
+
+    slash_mask = (
+        raw.str.contains(
+            "/",
+            regex=False,
+            na=False,
+        )
+    )
+
+    if slash_mask.any():
+        parsed.loc[
+            slash_mask
+        ] = pd.to_datetime(
+            raw.loc[
+                slash_mask
+            ],
+            format="%m/%d/%Y",
+            errors="coerce",
+        )
+
+    # --------------------------------------------------------
+    # ISO format:
+    #
+    #   2022-04-05
+    # --------------------------------------------------------
+
+    iso_mask = (
+        raw.str.contains(
+            "-",
+            regex=False,
+            na=False,
+        )
+    )
+
+    if iso_mask.any():
+        parsed.loc[
+            iso_mask
+        ] = pd.to_datetime(
+            raw.loc[
+                iso_mask
+            ],
+            format="%Y-%m-%d",
+            errors="coerce",
+        )
+
+    # --------------------------------------------------------
+    # Fail loudly on unknown/malformed values.
+    #
+    # Never silently reorder or guess dates because the
+    # chronological sequence is used for privileged alignment.
+    # --------------------------------------------------------
+
+    invalid_mask = (
+        parsed.isna()
+    )
+
+    if invalid_mask.any():
+        examples = (
+            raw.loc[
+                invalid_mask
+            ]
+            .drop_duplicates()
+            .head(10)
+            .tolist()
+        )
+
+        raise ValueError(
+            "Trackman game_date contains "
+            f"{int(invalid_mask.sum()):,} "
+            "unparseable rows. "
+            f"examples={examples}"
+        )
+
+    return parsed
+
+
 def load_privileged_trackman(
     path: Path,
 ) -> pd.DataFrame:
@@ -214,22 +346,34 @@ def load_privileged_trackman(
 
     frame[
         "_parsed_game_date"
-    ] = pd.to_datetime(
-        frame["game_date"],
-        errors="coerce",
+    ] = _parse_trackman_game_dates(
+        frame[
+            "game_date"
+        ]
     )
 
-    if (
+    parsed_min = (
         frame[
             "_parsed_game_date"
         ]
-        .isna()
-        .any()
-    ):
-        raise ValueError(
-            "Trackman game_date parsing "
-            "failed."
-        )
+        .min()
+    )
+
+    parsed_max = (
+        frame[
+            "_parsed_game_date"
+        ]
+        .max()
+    )
+
+    print(
+        "[LUPI-DATE] "
+        f"rows={len(frame):,} "
+        f"unique_dates="
+        f"{frame['_parsed_game_date'].nunique():,} "
+        f"min={parsed_min.date()} "
+        f"max={parsed_max.date()}"
+    )
 
     return frame
 
